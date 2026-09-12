@@ -1,0 +1,42 @@
+from __future__ import annotations
+
+from PyQt6 import QtGui
+from PyQt6 import QtWidgets
+from PyQt6.QtCore import Qt
+
+from .label_list_widget import HTMLDelegate
+from .label_list_widget import format_label_with_color_dot
+
+
+class _EscapableQListWidget(QtWidgets.QListWidget):
+    def keyPressEvent(self, keyEvent: QtGui.QKeyEvent) -> None:  # ty: ignore[invalid-method-override]
+        super().keyPressEvent(keyEvent)
+        if keyEvent.key() == Qt.Key.Key_Escape:
+            self.clearSelection()
+
+
+class UniqueLabelQListWidget(_EscapableQListWidget):
+    def __init__(self, parent: QtWidgets.QWidget | None = None) -> None:
+        super().__init__(parent=parent)
+        self.setItemDelegate(HTMLDelegate(parent=self))
+
+    def mousePressEvent(self, mouseEvent: QtGui.QMouseEvent) -> None:  # ty: ignore[invalid-method-override]
+        super().mousePressEvent(mouseEvent)
+        if not self.indexAt(mouseEvent.position().toPoint()).isValid():
+            self.clearSelection()
+
+    def find_label_item(self, label: str) -> QtWidgets.QListWidgetItem | None:
+        for row in range(self.count()):
+            item = self.item(row)
+            if item and item.data(Qt.ItemDataRole.UserRole) == label:
+                return item
+        return None
+
+    def add_label_item(self, label: str, color: tuple[int, int, int]) -> None:
+        if self.find_label_item(label):
+            raise ValueError(f"Item for label '{label}' already exists")
+
+        item = QtWidgets.QListWidgetItem()
+        item.setData(Qt.ItemDataRole.UserRole, label)  # for find_label_item
+        item.setText(format_label_with_color_dot(text=label, color=color))
+        self.addItem(item)

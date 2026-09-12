@@ -1,0 +1,79 @@
+# trainhub 参考环境（Apple Silicon / M5, macOS）
+#
+# 创建方式（推荐：conda 只负责提供一个干净的 Python，其余依赖全部走 pip，
+# 因为 macOS arm64 带 MPS 的 PyTorch 只在 pip 上提供）：
+#
+#   conda env create -f environment.yml
+#   conda activate trainhub
+#   pip install -e . --no-deps     # 安装 trainhub 本身（装了才有 trainhub 命令）
+#   python -m trainhub             # 启动图形界面
+#
+# 国内下载加速（实测清华镜像比 PyPI 快约 6 倍：4.4 MB/s vs 0.7 MB/s）：
+#   conda env create -f environment.yml
+#   pip install -e . --no-deps
+#   # 如果 pip 段下载过慢，先执行下面这行，再手动安装：
+#   pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+#
+# 本文件中的版本号 = 本机实测通过的一套组合（见下方 "实测版本"），
+# 用 >= 是为了留出升级空间；若要完全复现，把 >= 改成 == 即可。
+#
+# 说明：
+#   * 只想跑 YOLO 的话，可以删掉 nnunetv2 / nnibabel / SimpleITK / blosc2 等，
+#     安装体积和时间都会小很多。
+#   * KMP_DUPLICATE_LIB_OK、QT_API、PYTORCH_ENABLE_MPS_FALLBACK 由程序在
+#     trainhub/app.py 启动时自动设置，无需手动 export。
+#   * nnU-Net 的 nnUNet_raw / nnUNet_preprocessed / nnUNet_results 也由程序按项目
+#     目录自动设置，不会污染全局环境。
+#
+# 实测版本（macOS 25.6 / Darwin arm64, Python 3.11.16）：
+#   torch 2.14.0, torchvision 0.29.0        (torch.backends.mps.is_available() == True)
+#   ultralytics 8.4.149
+#   nnunetv2 2.8.1, batchgenerators 0.25.3, dynamic_network_architectures 0.4.4
+#   PyQt6 6.11.0 (Qt 6.11.2), matplotlib 3.11.2
+#   numpy 2.4.6, scipy 1.17.1, pandas 3.0.5, scikit-image 0.26.0, scikit-learn 1.9.1
+#   opencv-python 5.0.0.93, Pillow 12.3.0, tifffile 2026.3.3, nibabel 5.4.2, SimpleITK 2.5.6
+#   imgviz 2.1.0, natsort 8.4.0, loguru 0.7.3, PyYAML 6.0.3
+
+name: trainhub
+channels:
+  - conda-forge
+dependencies:
+  # conda 只装 Python 本身，避免 conda/pip 混装导致的 OpenMP 冲突
+  - python=3.11
+  - pip>=24.0
+  - pip:
+      # ---- 深度学习框架（重要：必须走 pip，才有 Apple MPS 支持）----
+      - torch>=2.2
+      - torchvision>=0.17
+
+      # ---- 图形界面 ----
+      - PyQt6>=6.6
+
+      # ---- 数据处理 / 可视化 ----
+      - numpy>=1.24
+      - Pillow>=10.0
+      - PyYAML>=6.0
+      - matplotlib>=3.8
+      - pandas>=2.0
+      - scipy>=1.11
+      - scikit-image>=0.22
+      - opencv-python>=4.9
+      - tifffile>=2024.1.30
+
+      # ---- 标注引擎（移植自 labelme 6.3.0）所需的轻量依赖 ----
+      - imgviz>=2.0
+      - loguru>=0.7
+      - natsort>=8.0
+
+      # ---- YOLO 训练后端 ----
+      - ultralytics>=8.3
+
+      # ---- nnU-Net 训练后端 ----
+      - nnunetv2>=2.5
+      - nibabel>=5.0
+      - SimpleITK>=2.3
+      - scikit-learn>=1.3
+
+      # ---- 开发/测试（不需要可删）----
+      - pytest>=8.0
+      - pytest-qt>=4.4

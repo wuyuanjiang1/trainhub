@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# 虚拟环境
+.venv/
+venv/
+env/
+
+# IDE / 编辑器
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# 本地项目数据（在仓库根目录运行过时生成）
+/trainhub_project/
+/images/
+/annotations/
+/datasets/
+/runs/
+
+# 训练权重 / 日志
+*.pt
+*.pth
+*.onnx
+*.log

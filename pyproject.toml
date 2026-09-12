@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "trainhub"
+version = "0.1.0"
+description = "基于 PyQt6 的一站式标注与训练工作站（YOLO / nnU-Net，可扩展）"
+requires-python = ">=3.10"
+dependencies = [
+    "PyQt6>=6.6",
+    "numpy>=1.24",
+    "Pillow>=10.0",
+    "PyYAML>=6.0",
+    "matplotlib>=3.8",
+    "imgviz>=2.0",
+    "loguru>=0.7",
+    "natsort>=8.0",
+    "tifffile>=2024.1.30",
+    "scipy>=1.11",
+    "scikit-image>=0.22",
+]
+
+[project.optional-dependencies]
+# 训练后端，按需安装；也可以直接用 environment.yml 一次装齐
+yolo = ["ultralytics>=8.3", "torch>=2.2", "torchvision>=0.17", "opencv-python>=4.9"]
+nnunet = ["nnunetv2>=2.5", "nibabel", "SimpleITK", "pandas", "scikit-learn"]
+dev = ["pytest>=8.0", "pytest-qt>=4.4"]
+
+[project.scripts]
+trainhub = "trainhub.app:run"
+
+[tool.setuptools.packages.find]
+include = ["trainhub*"]
+
+[tool.setuptools.package-data]
+"trainhub.annotator" = ["icons/**/*", "icons/*", "config/*.yaml"]
+
+[tool.pytest.ini_options]
+qt_api = "pyqt6"
+markers = ["gui: mark a test as a GUI test."]

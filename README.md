@@ -10,6 +10,20 @@
 - **数据转换**：labelme → YOLO 一键导出；导入 YOLO 数据集时自动反向转换为 labelme 格式。
 - **可扩展**：新增训练器只需实现 `BaseTrainer` 并 `@register_trainer` 注册，界面与调参表单自动生成。
 
+## 界面预览
+
+**数据集页**
+
+![数据集页](docs/images/dataset.png)
+
+**标注页**
+
+![标注页](docs/images/annotate.png)
+
+**训练页**
+
+![训练页](docs/images/train.png)
+
 ## 平台与 torch 版本明细
 
 | 平台 | 加速后端 | 推荐 torch | 推荐 torchvision | 说明 |

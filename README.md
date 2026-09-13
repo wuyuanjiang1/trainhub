@@ -80,7 +80,8 @@ python -m trainhub /path/to/proj   # 打开（或新建）指定项目目录
 - 普通图像：按文件/文件夹批量导入。
 - 已标注的 labelme 数据：导入图像时会自动带上同名的 `.json` 标注。
 - 已标注的 YOLO 数据：若所选文件夹是 YOLO 结构（含 `images/`、`labels/`、`dataset.yaml`），会自动转换回 labelme 格式再导入。
-- 导入新文件夹会清空当前项目数据（有确认提示），避免新旧数据混杂。
+- 导入新文件夹会清空当前项目数据（有确认提示），避免新旧数据混杂；旧数据会移入项目 `.trash/<时间戳>/` 目录，可随时手动找回。
+- 命名冲突自动处理：同名同后缀的重复图像自动改名（`name_1.jpg`）并同步改名其标注；同名不同后缀（`cat.png` 与 `cat.jpg`）也会改名导入但不携带归属不明的标注，导入完成后会列出明细。
 
 导入后，「数据集」页会显示图像总数、已标注数、对象总数以及各类别分布。
 
@@ -122,7 +123,9 @@ python scripts/test_vlm_grounding.py --provider deepseek --project /path/to/proj
 1. 选择 **训练框架**（YOLO / nnU-Net）和 **任务类型**（如目标检测）。
 2. 在左侧表单调整超参数（轮数、批大小、输入尺寸、学习率等）。
 3. 点击 **开始训练**，右侧可实时查看 **训练曲线 / 训练日志 / 产物**。
-4. 训练结束后，权重、日志、图表都保存在 `runs/<运行名>/`，可从「历史运行」下拉框回看任意一次训练的曲线与产物。
+4. 训练结束后，权重、日志、图表都保存在 `runs/<运行名>/`，可从「历史运行」下拉框回看任意一次训练的曲线与产物（产物第一条是数据集切分入口，双击打开目录）。
+5. 训练中断后，勾选「断点续训」并把运行名称填成中断那次的名字，程序会从该次运行的 `weights/last.pt` 继续。
+6. 点「推理预览…」可用训练产出的权重对项目图像（或任选文件夹）批量推理，画框结果存到该次运行的 `predictions/` 目录，应用内即可逐张预览。
 
 首次使用 YOLO 时会自动下载预训练权重到 `~/.cache/trainhub/weights`。
 
@@ -134,7 +137,8 @@ python scripts/test_vlm_grounding.py --provider deepseek --project /path/to/proj
 ├── images/              # 原始图像
 ├── annotations/         # labelme 格式的 JSON 标注
 ├── datasets/            # 转换后可直接喂给训练器的数据集
-└── runs/                # 每次训练的产物（权重、日志、图表）
+├── runs/                # 每次训练的产物（权重、日志、图表）
+└── .trash/              # 被替换/删除的旧数据（按时间戳归档，可手动找回）
 ```
 
 ## 训练后端说明
@@ -172,4 +176,4 @@ class MyTrainer(BaseTrainer):
 
 ## 致谢
 
-标注引擎移植自 [labelme](https://github.com/wkentaro/labelme) 6.3.0（GPL-3.0），标注格式与其完全兼容。
+标注引擎移植自 [labelme](https://github.com/wkentaro/labelme) 6.3.0（GPL-3.0），标注格式与其完全兼容；作为其衍生作品，本项目整体以 GPL-3.0 许可发布（见根目录 [LICENSE](LICENSE)），感谢 labelme 及其贡献者。

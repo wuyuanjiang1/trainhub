@@ -247,12 +247,26 @@ class TrainTab(QtWidgets.QWidget):
         self._log.appendPlainText(f"—— 载入历史运行 {Path(path).name} ——")
         self._artifacts.clear()
         self._artifact_preview.clear()
+        # 数据集切分汇总成一条入口（目录里几百张图像副本不逐条列出）
+        dataset_dir = Path(path) / "dataset"
+        has_dataset_item = False
+        if dataset_dir.is_dir():
+            def _count(split: str) -> int:
+                d = dataset_dir / "images" / split
+                return sum(1 for x in d.iterdir() if x.is_file()) if d.is_dir() else 0
+
+            item = QtWidgets.QListWidgetItem(
+                f"[数据集] 训练 {_count('train')} / 验证 {_count('val')}"
+                "（双击打开目录）"
+            )
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, str(dataset_dir))
+            self._artifacts.addItem(item)
+            has_dataset_item = True
         for file in sorted(Path(path).rglob("*")):
             if not file.is_file():
                 continue
             rel = file.relative_to(path)
-            # 训练时自动导出的中间数据集（几百个图像/标签副本）不是训练成果，
-            # 不进产物列表；实时训练的上报本来就不含它们。
+            # 训练时自动导出的中间数据集副本已在上面汇总为一条，不逐个列出。
             if rel.parts[0] == "dataset":
                 continue
             item = QtWidgets.QListWidgetItem(str(rel))
@@ -260,7 +274,7 @@ class TrainTab(QtWidgets.QWidget):
             self._artifacts.addItem(item)
         # Auto-preview the first artifact so the pane is never a dead wall.
         if self._artifacts.count():
-            self._artifacts.setCurrentRow(0)
+            self._artifacts.setCurrentRow(1 if has_dataset_item else 0)
 
     # -------------------------------------------------------------- running
     def start_training(self) -> None:
@@ -408,8 +422,8 @@ class TrainTab(QtWidgets.QWidget):
         self._set_running(False)
 
     def _open_artifact(self, item: QtWidgets.QListWidgetItem) -> None:
-        path = item.data(QtCore.Qt.ItemDataRole.UserRole)
+        path = Path(item.data(QtCore.Qt.ItemDataRole.UserRole))
         if path:
-            QtGui.QDesktopServices.openUrl(
-                QtCore.QUrl.fromLocalFile(str(Path(path).parent))
-            )
+            # 目录条目（如数据集切分）直接打开目录本身，文件则打开所在文件夹
+            target = path if path.is_dir() else path.parent
+            QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(target)))

@@ -361,6 +361,11 @@ class YoloTrainer(BaseTrainer):
             f"数据集已生成：训练 {exported.train_count} 张 / 验证 {exported.val_count} 张，"
             f"类别 {exported.classes}"
         )
+        sink.artifact(
+            str(exported.dataset_dir),
+            "dataset",
+            f"数据集切分（训练 {exported.train_count} / 验证 {exported.val_count}，双击打开）",
+        )
         sink.progress("转换数据集", len(items), len(items), "完成")
 
         return PreparedData(

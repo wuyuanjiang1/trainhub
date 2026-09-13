@@ -26,6 +26,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 from typing import Any
+from typing import Callable
 from typing import Sequence
 
 MAX_PROMPT_LABELS = 60
@@ -49,6 +50,11 @@ class VLMProvider:
     # 服务商是否官方声明了检测框（grounding）能力；未声明的建议先试标一张
     grounding_verified: bool = False
     docs_url: str = ""
+    # 元 / 百万 token（空闲时段价，用于费用估算）；None 表示未内置价格，
+    # 只显示 token 计数。实际费用以服务商账单为准（DeepSeek 高峰时段翻倍）。
+    input_price: float | None = None
+    output_price: float | None = None
+    cache_hit_price: float | None = None
 
 
 VLM_PROVIDERS: dict[str, VLMProvider] = {
@@ -60,6 +66,9 @@ VLM_PROVIDERS: dict[str, VLMProvider] = {
         models=("deepseek-flash",),
         grounding_verified=False,
         docs_url="https://api-docs.deepseek.com/zh-cn/guides/vision",
+        input_price=1.0,
+        output_price=4.0,
+        cache_hit_price=0.02,
     ),
     "zhipu": VLMProvider(
         key="zhipu",
@@ -115,6 +124,85 @@ def provider_env_key(provider_key: str) -> str | None:
         if value:
             return value
     return None
+
+
+def _fmt_tokens(count: int) -> str:
+    return f"{count / 10000:.2f}万" if count >= 10000 else str(count)
+
+
+class UsageTracker:
+    """一次预标注运行的 token / 检出统计，用于界面上的花费标识。
+
+    ``add_usage`` 吃 chat/completions 响应里的 ``usage`` 字段（DeepSeek 的
+    ``prompt_cache_hit_tokens`` 和 OpenAI 风格的
+    ``prompt_tokens_details.cached_tokens`` 都认）；``note_image`` 逐张记录
+    检出与否。QThread 里累加、主线程读快照，纯 int/dict 操作无需加锁。
+    """
+
+    def __init__(self) -> None:
+        self.images = 0
+        self.found_images = 0
+        self.empty_images = 0
+        self.requests = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
+        self.cache_hit_tokens = 0
+
+    # ---------------------------------------------------------------- update
+    def add_usage(self, usage: dict) -> None:
+        self.requests += 1
+        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+        self.completion_tokens += int(usage.get("completion_tokens") or 0)
+        hit = usage.get("prompt_cache_hit_tokens")  # DeepSeek
+        if hit is None:
+            details = usage.get("prompt_tokens_details")  # OpenAI 风格
+            if isinstance(details, dict):
+                hit = details.get("cached_tokens")
+        self.cache_hit_tokens += int(hit or 0)
+
+    def note_image(self, found: bool) -> None:
+        self.images += 1
+        if found:
+            self.found_images += 1
+        else:
+            self.empty_images += 1
+
+    # ----------------------------------------------------------------- view
+    def estimate_cost(self, provider: "VLMProvider | None") -> float | None:
+        """按服务商空闲档单价估算费用（元）；价格未内置时返回 None。"""
+        if provider is None or provider.input_price is None or provider.output_price is None:
+            return None
+        if provider.cache_hit_price is not None:
+            hit = self.cache_hit_tokens
+        else:
+            hit = 0
+        cost = (self.prompt_tokens - hit) / 1e6 * provider.input_price
+        cost += hit / 1e6 * (provider.cache_hit_price or provider.input_price)
+        cost += self.completion_tokens / 1e6 * provider.output_price
+        return cost
+
+    def format(self, provider: "VLMProvider | None" = None) -> str:
+        if self.images:
+            rate = self.found_images / self.images
+            parts = [
+                f"已处理 {self.images} 张",
+                f"检出 {self.found_images}（{rate:.0%}）",
+                f"空 {self.empty_images}",
+            ]
+        else:
+            parts = ["尚未处理图像"]
+        if self.requests:
+            parts.append(
+                f"tokens ↑{_fmt_tokens(self.prompt_tokens)}"
+                f" ↓{_fmt_tokens(self.completion_tokens)}"
+            )
+        if self.cache_hit_tokens and self.prompt_tokens:
+            parts.append(f"缓存命中 {self.cache_hit_tokens / self.prompt_tokens:.0%}")
+        cost = self.estimate_cost(provider)
+        if cost is not None:
+            shown = f"{cost:.4f}".rstrip("0").rstrip(".") or "0"
+            parts.append(f"≈¥{shown}")
+        return " · ".join(parts)
 
 
 # --------------------------------------------------------------------- prompt
@@ -280,7 +368,7 @@ def _chat_completion(
         try:
             with urllib.request.urlopen(request, timeout=timeout) as response:
                 body = json.loads(response.read().decode("utf-8"))
-            return _extract_content(body)
+            return _extract_content(body), _extract_usage(body)
         except urllib.error.HTTPError as exc:
             detail = ""
             try:
@@ -296,6 +384,12 @@ def _chat_completion(
         except (json.JSONDecodeError, KeyError, IndexError, TypeError) as exc:
             last_error = VLMError(f"响应格式无法解析: {exc}")
     raise last_error or VLMError("请求失败")
+
+
+def _extract_usage(body: dict) -> dict:
+    """取响应里的 token 用量；缺失时返回空字典。"""
+    usage = body.get("usage")
+    return usage if isinstance(usage, dict) else {}
 
 
 def _extract_content(body: dict) -> str:
@@ -712,6 +806,7 @@ def predict_shapes_vlm(
     timeout: float = 90.0,
     retries: int = 2,
     label_translator: "Callable[[str | None, str], str] | None" = None,
+    usage_tracker: "UsageTracker | None" = None,
 ) -> list[dict]:
     """对单张图像调用视觉大模型，返回候选标注（labelme shape 字典）。
 
@@ -733,7 +828,7 @@ def predict_shapes_vlm(
 
     effective_labels = extract_label_whitelist(prompt) or list(labels)
     image_b64, width, height, scale = _encode_image(image_path, max_side=max_side)
-    content = _chat_completion(
+    content, usage = _chat_completion(
         base_url=base,
         api_key=api_key.strip(),
         model=model,
@@ -742,6 +837,8 @@ def predict_shapes_vlm(
         timeout=timeout,
         retries=retries,
     )
+    if usage_tracker is not None:
+        usage_tracker.add_usage(usage)
     if not content:
         raise VLMError("模型返回了空内容，请检查模型是否支持图像输入")
     shapes, _warnings = parse_detections(
@@ -772,7 +869,7 @@ def test_connection(
 
     Image.new("RGB", (64, 64), (200, 40, 40)).save(buffer, format="JPEG", quality=80)
     image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
-    content = _chat_completion(
+    content, _usage = _chat_completion(
         base_url=(base_url or provider.base_url).strip().rstrip("/"),
         api_key=api_key.strip(),
         model=(model or provider.default_model).strip(),

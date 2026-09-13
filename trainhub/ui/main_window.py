@@ -1,16 +1,17 @@
-"""主窗口：数据集 / 标注 / 训练 三个页签 + 项目管理。"""
+"""主窗口：顶栏（项目操作 + 主题切换）+ 数据集 / 标注 / 训练 / 推理 四页签。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6 import QtCore
 from PyQt6 import QtGui
 from PyQt6 import QtWidgets
 
 from ..core.project import Project
 from .annotate_tab import AnnotateTab
 from .dataset_tab import DatasetTab
+from .infer_tab import InferTab
+from .top_bar import TopBar
 from .train_tab import TrainTab
 
 
@@ -37,15 +38,31 @@ class MainWindow(QtWidgets.QMainWindow):
         self._annotate = AnnotateTab(self._project)
         self._dataset = DatasetTab(self._project)
         self._train = TrainTab(self._project)
+        self._infer = InferTab(self._project)
 
         self._tabs = QtWidgets.QTabWidget()
         self._tabs.addTab(self._dataset, "数据集")
         self._tabs.addTab(self._annotate, "标注")
         self._tabs.addTab(self._train, "训练")
-        self.setCentralWidget(self._tabs)
+        self._tabs.addTab(self._infer, "推理")
+
+        self._top_bar = TopBar()
+        self._top_bar.new_project_requested.connect(self.new_project)
+        self._top_bar.open_project_requested.connect(self.open_project)
+        self._top_bar.save_project_requested.connect(self.save_project)
+        self._top_bar.about_requested.connect(self._show_about)
+
+        central = QtWidgets.QWidget()
+        central_layout = QtWidgets.QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._top_bar)
+        central_layout.addWidget(self._tabs, 1)
+        self.setCentralWidget(central)
 
         self._annotate.statusMessage.connect(self.statusBar().showMessage)
         self._train.statusMessage.connect(self.statusBar().showMessage)
+        self._infer.statusMessage.connect(self.statusBar().showMessage)
         self._annotate.labelsChanged.connect(lambda _: self._dataset.refresh())
         self._annotate.imagesChanged.connect(lambda: self._dataset.refresh())
         self._annotate.dirtyChanged.connect(self._on_dirty_changed)
@@ -53,41 +70,22 @@ class MainWindow(QtWidgets.QMainWindow):
 
         self._dataset.requestImportFiles.connect(self._annotate.import_images)
         self._dataset.requestImportFolder.connect(self._annotate.import_folder)
+        self._top_bar.set_project(self._project.name)
 
-        self._build_menu()
-        self._build_toolbar()
+        # 快捷键（原菜单项迁移；action 挂在主窗口上即可全局生效）
+        for text, seq, slot in (
+            ("新建项目", "Ctrl+N", self.new_project),
+            ("打开项目", "Ctrl+Shift+O", self.open_project),
+            ("保存项目", "Ctrl+Shift+S", self.save_project),
+            ("刷新统计", "F5", self._dataset.refresh),
+        ):
+            action = QtGui.QAction(text, self)
+            action.setShortcut(seq)
+            action.triggered.connect(slot)
+            self.addAction(action)
+
         self._update_title()
         self.statusBar().showMessage(f"项目目录：{self._project.root}")
-
-    # ----------------------------------------------------------------- menu
-    def _build_menu(self) -> None:
-        project_menu = self.menuBar().addMenu("项目")
-        project_menu.addAction(self._action("新建项目…", self.new_project, "Ctrl+N"))
-        project_menu.addAction(self._action("打开项目…", self.open_project, "Ctrl+Shift+O"))
-        project_menu.addAction(self._action("保存项目", self.save_project, "Ctrl+Shift+S"))
-        project_menu.addSeparator()
-        project_menu.addAction(self._action("退出", self.close, "Ctrl+Q"))
-
-        data_menu = self.menuBar().addMenu("数据")
-        data_menu.addAction(self._action("导入图像文件…", self._annotate.import_images))
-        data_menu.addAction(
-            self._action("导入图像文件夹…", self._annotate.import_folder)
-        )
-        data_menu.addAction(self._action("刷新统计", self._dataset.refresh, "F5"))
-
-        help_menu = self.menuBar().addMenu("帮助")
-        help_menu.addAction(self._action("关于 trainhub", self._show_about))
-
-    def _build_toolbar(self) -> None:
-        toolbar = QtWidgets.QToolBar("主工具栏")
-        toolbar.setMovable(False)
-        toolbar.addAction(self._action("打开项目…", self.open_project))
-        toolbar.addSeparator()
-        toolbar.addAction(self._action("导入文件", self._annotate.import_images))
-        toolbar.addAction(self._action("导入文件夹", self._annotate.import_folder))
-        toolbar.addSeparator()
-        toolbar.addAction(self._action("保存标注", self._annotate.save_current))
-        self.addToolBar(toolbar)
 
     def _action(self, text: str, slot, shortcut: str | None = None) -> QtGui.QAction:
         action = QtGui.QAction(text, self)
@@ -131,6 +129,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self._annotate.set_project(project)
         self._dataset.set_project(project)
         self._train.set_project(project)
+        self._infer.set_project(project)
         self._update_title()
         self.statusBar().showMessage(f"项目目录：{project.root}")
 
@@ -140,8 +139,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("有未保存的标注修改")
 
     def _update_title(self) -> None:
-        # 标题栏保持简洁；项目名/目录见状态栏，未保存修改会提示在状态栏。
-        self.setWindowTitle("trainhub")
+        self.setWindowTitle(f"trainhub · {self._project.name}")
+        self._top_bar.set_project(self._project.name)
 
     # ---------------------------------------------------------------- misc
     def _show_about(self) -> None:
@@ -168,6 +167,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 a0.ignore()
                 return
             self._train.shutdown()
+        if self._infer.has_running_worker():
+            self._infer.shutdown()
         if self._annotate._dirty:
             answer = QtWidgets.QMessageBox.question(
                 self,

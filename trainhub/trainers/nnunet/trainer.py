@@ -395,6 +395,11 @@ class NnunetTrainer(BaseTrainer):
             f"数据集 {exported.dataset_dir.name}：训练 {exported.train_count} 例，"
             f"留出测试 {exported.holdout_count} 例，通道 {list(exported.channels.values())}"
         )
+        sink.artifact(
+            str(exported.dataset_dir),
+            "dataset",
+            f"nnUNet 数据集（训练 {exported.train_count} / 留出 {exported.holdout_count}，双击打开）",
+        )
         sink.log(
             "说明：nnUNet 在训练集内部自行做 5 折交叉验证，验证曲线来自所选折；"
             "留出测试集不参与训练，仅供后续评估"

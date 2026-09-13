@@ -22,12 +22,7 @@ from matplotlib.figure import Figure
 from PyQt6 import QtWidgets
 
 from ..core.events import MetricEvent
-from .theme import ACCENT
-from .theme import BG
-from .theme import BORDER
-from .theme import SURFACE
-from .theme import TEXT
-from .theme import TEXT_DIM
+from . import theme as theme_mod
 
 matplotlib.rcParams["font.sans-serif"] = [
     "PingFang SC",
@@ -40,31 +35,12 @@ matplotlib.rcParams["font.sans-serif"] = [
 ]
 matplotlib.rcParams["axes.unicode_minus"] = False
 
-# Dark figure / axes so the chart matches the app; indigo leads the cycle.
-matplotlib.rcParams["figure.facecolor"] = BG
-matplotlib.rcParams["axes.facecolor"] = SURFACE
-matplotlib.rcParams["axes.edgecolor"] = BORDER
-matplotlib.rcParams["axes.labelcolor"] = TEXT_DIM
-matplotlib.rcParams["text.color"] = TEXT_DIM
-matplotlib.rcParams["xtick.color"] = TEXT_DIM
-matplotlib.rcParams["ytick.color"] = TEXT_DIM
-matplotlib.rcParams["grid.color"] = BORDER
-matplotlib.rcParams["legend.facecolor"] = SURFACE
-matplotlib.rcParams["legend.edgecolor"] = BORDER
-matplotlib.rcParams["axes.prop_cycle"] = cycler(
-    color=[
-        ACCENT,
-        "#6A9BCC",
-        "#788C5D",
-        "#D98E2B",
-        "#8A6F4D",
-        "#7C6BC4",
-        "#C0392B",
-        "#4A8FB5",
-        "#B45309",
-        "#5E7D8C",
-    ]
-)
+# 图表配色完全跟随主题（构造与主题切换时经 apply_theme 应用）；
+# 曲线主色 = 珊瑚橙，次序为规范里的语义图表色（橙/金/绿/紫…）。
+_CHART_CYCLE = [
+    "#D97757", "#C2913D", "#5E8C56", "#8A7FB8",
+    "#4A8FB5", "#B45309", "#7C6BC4", "#5E7D8C",
+]
 
 _AXIS_LOSS = 0
 _AXIS_METRIC = 1
@@ -123,7 +99,47 @@ class MetricChart(QtWidgets.QWidget):
         layout.addWidget(self._toolbar)
         layout.addWidget(self._canvas, 1)
 
+        theme_mod.subscribe_theme_listener(self.apply_theme)
+        self.apply_theme(theme_mod.is_dark())
+
         self.reset()
+
+    # ----------------------------------------------------------------- theme
+    def apply_theme(self, dark: bool) -> None:
+        """跟随主题重刷图表配色（matplotlib 不走 QSS，需显式应用）。"""
+        pal = theme_mod.DARK if dark else theme_mod.LIGHT
+        matplotlib.rcParams.update(
+            {
+                "figure.facecolor": pal["BG"],
+                "axes.facecolor": pal["PANEL"],
+                "axes.edgecolor": pal["HAIRLINE"],
+                "axes.labelcolor": pal["INK2"],
+                "text.color": pal["INK2"],
+                "xtick.color": pal["INK2"],
+                "ytick.color": pal["INK2"],
+                "grid.color": pal["HAIRLINE"],
+                "legend.facecolor": pal["PANEL"],
+                "legend.edgecolor": pal["HAIRLINE"],
+                "axes.prop_cycle": cycler(color=_CHART_CYCLE),
+            }
+        )
+        self._figure.set_facecolor(pal["PANEL"])
+        for axis in self._axes:
+            axis.set_facecolor(pal["PANEL"])
+        # 工具条图标为深色字形，深色主题下浮在 panel 色细条上保持可见
+        bg = pal["PANEL"]
+        border = pal["HAIRLINE"]
+        hover = pal["PANEL_ALT"]
+        self._toolbar.setStyleSheet(
+            f"QToolBar {{ background: {bg}; border: none;"
+            f" border-bottom: 1px solid {border}; padding: 2px 6px; spacing: 2px; }}"
+            "QToolButton { background: transparent; border: none;"
+            " border-radius: 6px; padding: 3px; }"
+            f"QToolButton:hover {{ background: {hover}; }}"
+            f"QToolBar::separator {{ background: {border};"
+            " width: 1px; margin: 4px 4px; }"
+        )
+        self._redraw()
 
     # ------------------------------------------------------------------ data
     def reset(self) -> None:
@@ -166,13 +182,13 @@ class MetricChart(QtWidgets.QWidget):
                 xs = [point[0] for point in points]
                 ys = [point[1] for point in points]
                 axis.plot(xs, ys, linewidth=1.6, label=_pretty(key))
-            axis.set_title(_AXIS_TITLES[index], fontsize=10, color=TEXT)
+            axis.set_title(_AXIS_TITLES[index], fontsize=10, color=theme_mod.TEXT)
             axis.grid(True, alpha=0.4)
             legend = axis.legend(fontsize=8, loc="best")
             if legend is not None:
                 for text in legend.get_texts():
-                    text.set_color(TEXT_DIM)
-            axis.tick_params(labelsize=8, colors=TEXT_DIM)
+                    text.set_color(theme_mod.TEXT_DIM)
+            axis.tick_params(labelsize=8, colors=theme_mod.TEXT_DIM)
 
         self._axes[-1].set_xlabel("Epoch", fontsize=9)
         self._canvas.draw_idle()

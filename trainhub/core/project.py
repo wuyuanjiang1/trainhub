@@ -33,6 +33,10 @@ class Project:
     task_key: str = "detect"
     labels: list[str] = field(default_factory=list)
     params: dict[str, Any] = field(default_factory=dict)
+    # VLM 预标注的译名登记表：类别原名称（如中文/模型自由命名）-> 项目内
+    # 唯一的英文标准名。模型对同一目标的英文写法不稳定（wooden stick /
+    # wooden_stick / stick），靠这张表把变体收敛到一个标签上。
+    label_translations: dict[str, str] = field(default_factory=dict)
 
     # ---------------------------------------------------------------- paths
     @property
@@ -89,6 +93,7 @@ class Project:
             task_key=data.get("task", "detect"),
             labels=list(data.get("labels") or []),
             params=dict(data.get("params") or {}),
+            label_translations=dict(data.get("label_translations") or {}),
         )
 
     @classmethod
@@ -106,6 +111,7 @@ class Project:
             "task": self.task_key,
             "labels": list(self.labels),
             "params": self.params,
+            "label_translations": self.label_translations,
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             yaml.safe_dump(payload, f, allow_unicode=True, sort_keys=False)
@@ -130,3 +136,21 @@ class Project:
 
     def label_index(self) -> dict[str, int]:
         return {label: i for i, label in enumerate(self.labels)}
+
+    def canonicalize_label(self, reference: str | None, label: str) -> str:
+        """把模型输出的英文标注词收敛成项目内唯一的标准名。
+
+        有类别原名称（reference，如 label_cn）时，优先复用登记表里既有的
+        英文译名；首次遇到则把归一化结果登记进去，之后所有变体都映射回
+        同一个标签。无对照时只做归一化。
+        """
+        from .vlm import normalize_english_label
+
+        normalized = normalize_english_label(label)
+        if not reference or reference == normalized:
+            return normalized
+        known = self.label_translations.get(reference)
+        if known:
+            return known
+        self.label_translations[reference] = normalized
+        return normalized

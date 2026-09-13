@@ -189,6 +189,15 @@ class YoloTrainer(BaseTrainer):
                 maximum=100_000,
             ),
             ParamSpec(
+                key="resume",
+                label="断点续训",
+                type="bool",
+                default=False,
+                group="训练",
+                help="从上次中断的 last.pt 继续（运行名称需填中断那次训练的名字，"
+                "沿用中断时的全部参数，其余表单项被忽略）",
+            ),
+            ParamSpec(
                 key="imgsz",
                 label="输入尺寸",
                 type="int",
@@ -361,6 +370,11 @@ class YoloTrainer(BaseTrainer):
             f"数据集已生成：训练 {exported.train_count} 张 / 验证 {exported.val_count} 张，"
             f"类别 {exported.classes}"
         )
+        sink.artifact(
+            str(exported.dataset_dir),
+            "dataset",
+            f"数据集切分（训练 {exported.train_count} / 验证 {exported.val_count}，双击打开）",
+        )
         sink.progress("转换数据集", len(items), len(items), "完成")
 
         return PreparedData(
@@ -428,7 +442,18 @@ class YoloTrainer(BaseTrainer):
             "device": device,
         }
 
-        model = YOLO(weights)
+        resume = bool(params.get("resume", False))
+        if resume:
+            last = job.run_dir / "weights" / "last.pt"
+            if not last.exists():
+                raise RuntimeError(
+                    f"运行目录 {job.run_dir} 下没有 weights/last.pt，无法续训"
+                    "（运行名称需与中断那次训练一致）"
+                )
+            sink.log(f"断点续训：从 {last} 继续（沿用中断时的全部参数）")
+            model = YOLO(str(last))
+        else:
+            model = YOLO(weights)
 
         state = {"best": {}}
 
@@ -511,9 +536,13 @@ class YoloTrainer(BaseTrainer):
         run_dir.mkdir(parents=True, exist_ok=True)
 
         with MetricRecorder(run_dir) as record:
-            sink.progress("训练", 0, epochs, "开始训练")
+            sink.progress("训练", 0, epochs, "断点续训" if resume else "开始训练")
             try:
-                model.train(**kwargs)
+                if resume:
+                    # Ultralytics 的 resume 完全沿用断点里保存的参数与输出目录
+                    model.train(resume=True)
+                else:
+                    model.train(**kwargs)
             except Exception as exc:
                 if sink.cancelled():
                     sink.log(f"训练已中止: {exc}", "warning")

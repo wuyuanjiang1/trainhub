@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import math
 import os
-import shutil
 from pathlib import Path
 
 import imgviz
@@ -32,12 +31,19 @@ from ..annotator import write_label_file
 from ..annotator._qt import add_actions
 from ..annotator.widgets.label_list_widget import LabelListWidgetItem
 from ..annotator.widgets.label_list_widget import format_shape_label
+from ..core import importer
 from ..core.dataset import IMAGE_SUFFIXES
 from ..core.prelabel import find_project_weights
+from . import theme as _theme
+from ..core.prelabel import predict_shapes
+from ..core.vlm import UsageTracker
+from ..core.vlm import VLM_PROVIDERS
+from ..core.vlm import predict_shapes_vlm
 from ..core.project import Project
 from ..trainers.yolo.converter import import_yolo_dataset
 from .prelabel_dialog import PrelabelDialog
 from .prelabel_dialog import PrelabelWorker
+from .theme import SUCCESS
 from .theme import section_label
 
 LABEL_COLORMAP = imgviz.label_colormap()
@@ -113,6 +119,8 @@ def dict_to_shape(raw: dict) -> Shape:
         group_id=raw.get("group_id"),
         description=raw.get("description") or "",
     )
+    # 保留 VLM 预标注回传的 other_data（如 label_cn 中英对照）
+    shape.other_data = dict(raw.get("other_data") or {})
     shape.points = [
         QtCore.QPointF(float(x), float(y)) for x, y in (raw.get("points") or [])
     ]
@@ -143,9 +151,13 @@ class AnnotateTab(QtWidgets.QWidget):
         self._shape_clipboard = ShapeClipboard(self)
         self._prelabel_dialog: PrelabelDialog | None = None
         self._prelabel_worker: PrelabelWorker | None = None
+        self._prelabel_tracker: UsageTracker | None = None
+        self._prelabel_stats_provider = None
         self._prelabel_new_labels: set[str] = set()
         self._prelabel_written = 0
         self._prelabel_applied = 0
+        self._prelabel_empty: list[str] = []
+        self._prelabel_issues: list[tuple[str, str]] = []
 
         self._label_dialog = LabelDialog(
             text="输入或选择标签",
@@ -169,6 +181,8 @@ class AnnotateTab(QtWidgets.QWidget):
         self._scroll.setWidget(self._canvas)
         self._scroll.setWidgetResizable(True)
         self._scroll.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        _theme.subscribe_theme_listener(self._apply_viewport_theme)
+        self._apply_viewport_theme(_theme.is_dark())
 
         self._zoom_widget = ZoomWidget()
         self._zoom_widget.valueChanged.connect(self._paint_canvas)
@@ -201,6 +215,8 @@ class AnnotateTab(QtWidgets.QWidget):
         self._build_toolbar()
         self._build_layout()
         self._populate_canvas_context_menu()
+        # 标签表任何变化（导入/预标注登记/删除）都同步重建候选标签列表
+        self.labelsChanged.connect(self._on_labels_changed)
 
         self._switch_canvas_mode(edit=True)
         self.set_project(project)
@@ -505,6 +521,15 @@ class AnnotateTab(QtWidgets.QWidget):
                 color=self._get_rgb_by_label(label, self._unique_label_list),
             )
 
+    def _on_labels_changed(self, labels: list) -> None:
+        """项目标签表变化时，同步候选标签列表与标注对话框，无需重开项目。"""
+        self._label_dialog = LabelDialog(
+            text="输入或选择标签",
+            parent=self,
+            labels=list(labels),
+        )
+        self._rebuild_unique_label_list()
+
     def _reset_state(self) -> None:
         self._label_list.clear()
         self._image_path = None
@@ -527,6 +552,7 @@ class AnnotateTab(QtWidgets.QWidget):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
+                item.setForeground(QtGui.QColor(SUCCESS))
             else:
                 item.setToolTip("未标注")
             self._file_list.addItem(item)
@@ -676,17 +702,58 @@ class AnnotateTab(QtWidgets.QWidget):
         self._prelabel_dialog.show()
 
     def _start_prelabel(self, params: dict) -> None:
+        engine = params.get("engine", "yolo")
+        tracker = UsageTracker()
+        self._prelabel_tracker = tracker
+        self._prelabel_stats_provider = None
+        if engine == "vlm":
+            provider = VLM_PROVIDERS[params["provider"]]
+            self._prelabel_stats_provider = provider
+            labels = list(self._project.labels)
+
+            def predict_fn(image_path: Path) -> list[dict]:
+                shapes = predict_shapes_vlm(
+                    str(image_path),
+                    provider=provider,
+                    api_key=params["api_key"],
+                    model=params["model"],
+                    base_url=params["base_url"],
+                    labels=labels,
+                    hint=params.get("hint", ""),
+                    prompt=params.get("prompt", ""),
+                    label_translator=self._project.canonicalize_label,
+                    usage_tracker=tracker,
+                )
+                tracker.note_image(found=bool(shapes))
+                return shapes
+
+            note = provider.display_name
+            if params["write"]:
+                note += "；图像将上传至该服务商"
+        else:
+            weights, conf, device = params["weights"], params["conf"], params["device"]
+
+            def predict_fn(image_path: Path) -> list[dict]:
+                shapes = predict_shapes(str(image_path), weights, conf, device=device)
+                tracker.note_image(found=bool(shapes))
+                return shapes
+
+            note = f"计算设备 {params['device']}"
+            if params.get("device_warning"):
+                note += f"；{params['device_warning']}"
+
         worker = PrelabelWorker(
             jobs=params["jobs"],
-            weights=params["weights"],
-            conf=params["conf"],
-            device=params["device"],
+            predict_fn=predict_fn,
             write_to_disk=params["write"],
             parent=self,
         )
         worker.progress.connect(self._prelabel_dialog.on_progress)
+        worker.progress.connect(self._refresh_prelabel_stats)
         worker.image_ready.connect(self._on_prelabel_image_ready)
         worker.file_done.connect(self._on_prelabel_file_done)
+        worker.file_empty.connect(self._on_prelabel_file_empty)
+        worker.file_skipped.connect(self._on_prelabel_skipped)
         worker.failed.connect(self._on_prelabel_failed)
         worker.finished.connect(self._on_prelabel_finished)
         self._prelabel_worker = worker
@@ -694,9 +761,9 @@ class AnnotateTab(QtWidgets.QWidget):
         self._prelabel_new_labels = set()
         self._prelabel_written = 0
         self._prelabel_applied = 0
-        self._prelabel_dialog.begin_run(
-            len(params["jobs"]), params["device"], params.get("device_warning")
-        )
+        self._prelabel_empty: list[str] = []
+        self._prelabel_issues = []
+        self._prelabel_dialog.begin_run(len(params["jobs"]), note)
         if params["write"]:
             self.statusMessage.emit("AI 预标注：批量推理中 …")
         worker.start()
@@ -731,7 +798,23 @@ class AnnotateTab(QtWidgets.QWidget):
             font = item.font()
             font.setBold(True)
             item.setFont(font)
+            item.setForeground(QtGui.QColor(SUCCESS))
             item.setToolTip("已标注（AI 预标注）")
+
+    def _on_prelabel_file_empty(self, image_path: str) -> None:
+        self._prelabel_empty.append(image_path)
+
+    def _on_prelabel_skipped(self, image_path: str, reason: str) -> None:
+        self._prelabel_issues.append((Path(image_path).name, reason))
+        self.statusMessage.emit(f"AI 预标注跳过 {Path(image_path).name}：{reason}")
+
+    def _refresh_prelabel_stats(self, *_args: object) -> None:
+        """每处理完一张，刷新对话框里的 token / 检出率 / 费用标识。"""
+        tracker = getattr(self, "_prelabel_tracker", None)
+        if tracker is not None:
+            self._prelabel_dialog.update_stats(
+                tracker.format(self._prelabel_stats_provider)
+            )
 
     def _on_prelabel_failed(self, message: str) -> None:
         self.statusMessage.emit(f"AI 预标注失败: {message}")
@@ -741,30 +824,68 @@ class AnnotateTab(QtWidgets.QWidget):
         worker = self._prelabel_worker
         cancelled = bool(worker is not None and getattr(worker, "_cancelled", False))
         self._register_prelabel_labels(self._prelabel_new_labels)
+        # 译名登记表可能新增了条目（标签集未变时不会触发自动保存）
+        if self._prelabel_written or self._prelabel_applied:
+            self._project.save()
         dialog = self._prelabel_dialog
         if dialog is not None:
             dialog.on_finished()
             if cancelled:
                 dialog.mark_done("已停止。已处理的图像保持有效。")
             elif worker is not None and getattr(worker, "_write", False):
-                dialog.mark_done(
-                    f"完成，共为 {self._prelabel_written} 张图像写入候选标注。\n"
-                    "候选可能有漏检/误检，请逐张检查微调后保存。"
-                )
+                summary = self._batch_summary_message()
+                dialog.mark_done(summary)
             else:
                 dialog.mark_done(
                     f"完成，已在当前图像添加 {self._prelabel_applied} 个候选标注。\n"
                     "请检查微调后保存；不满意可点撤销。"
                 )
         self.statusMessage.emit(
-            "AI 预标注已停止" if cancelled else f"AI 预标注完成：{self._prelabel_written} 张"
+            "AI 预标注已停止" if cancelled else self._batch_summary_message(short=True)
         )
         self._prelabel_worker = None
+
+    def _batch_summary_message(self, short: bool = False) -> str:
+        empty_count = len(self._prelabel_empty)
+        head = f"AI 预标注完成：写入 {self._prelabel_written} 张"
+        if short:
+            return head + (f"，{empty_count} 张未检出候选" if empty_count else "")
+        message = f"完成，共为 {self._prelabel_written} 张图像写入候选标注。"
+        if self._prelabel_issues:
+            sample = "；".join(f"{n}（{r}）" for n, r in self._prelabel_issues[:3])
+            more = f" 等 {len(self._prelabel_issues)} 项" if len(self._prelabel_issues) > 3 else ""
+            message += f"\n⚠ 跳过 {len(self._prelabel_issues)} 张：{sample}{more}。"
+        if not self._prelabel_empty:
+            return message + "\n候选可能有漏检/误检，请逐张检查微调后保存。"
+        sample = "、".join(
+            Path(p).name for p in self._prelabel_empty[:4]
+        )
+        more = f" 等 {empty_count} 张" if empty_count > 4 else ""
+        message += f"\n⚠ {empty_count} 张未检出任何候选（{sample}{more}）。"
+        if self._prelabel_written == 0:
+            message += (
+                "\n所有图像都返回空结果：请检查检测提示词与类别列表是否匹配，"
+                "或换一个服务商（如智谱 GLM / 百炼 Qwen-VL）再试。"
+            )
+        else:
+            message += "可能是目标太小或模型漏检，可换服务商或调整提示词后重跑未标注图像。"
+        return message
 
     def _register_prelabel_labels(self, labels: set[str]) -> None:
         if labels and self._project.add_labels(sorted(labels)):
             self._project.save()
             self.labelsChanged.emit(list(self._project.labels))
+
+    def _conflict_note(self, warnings: list[str]) -> str:
+        return f"（{len(warnings)} 条命名冲突已自动改名）" if warnings else ""
+
+    def _show_import_warnings(self, warnings: list[str]) -> None:
+        if not warnings:
+            return
+        body = "\n".join(warnings[:8])
+        if len(warnings) > 8:
+            body += f"\n…共 {len(warnings)} 条"
+        QtWidgets.QMessageBox.warning(self, "导入完成（存在命名冲突）", body)
 
     def import_images(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
@@ -773,18 +894,23 @@ class AnnotateTab(QtWidgets.QWidget):
         if not paths:
             return
         self._project.images_dir.mkdir(parents=True, exist_ok=True)
+        used = {
+            p.stem: p.suffix.lower()
+            for p in self._project.images_dir.iterdir()
+            if p.is_file()
+        }
         imported_labels: set[str] = set()
         imported = 0
+        warnings: list[str] = []
         for path in paths:
-            src = Path(path)
-            target = self._project.images_dir / src.name
-            if target.exists():
-                continue
-            imported_labels |= self._copy_image_with_annotation(src, target)
+            imported_labels |= importer.import_image_file(self._project, Path(path), used, warnings)
             imported += 1
         self._merge_imported_labels(imported_labels)
         self.refresh_file_list()
-        self.statusMessage.emit(f"已导入 {imported} 张图像")
+        self.statusMessage.emit(
+            f"已导入 {imported} 张图像" + self._conflict_note(warnings)
+        )
+        self._show_import_warnings(warnings)
         self.imagesChanged.emit()
 
     def import_folder(self) -> None:
@@ -802,17 +928,23 @@ class AnnotateTab(QtWidgets.QWidget):
 
         imported_labels: set[str] = set()
         copied = 0
+        warnings: list[str] = []
+        used = {
+            p.stem: p.suffix.lower()
+            for p in self._project.images_dir.iterdir()
+            if p.is_file()
+        } if self._project.images_dir.exists() else {}
         self._project.images_dir.mkdir(parents=True, exist_ok=True)
         for path in sorted(folder.rglob("*")):
             if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
-                target = self._project.images_dir / path.name
-                if target.exists():
-                    continue
-                imported_labels |= self._copy_image_with_annotation(path, target)
+                imported_labels |= importer.import_image_file(self._project, path, used, warnings)
                 copied += 1
         self._merge_imported_labels(imported_labels)
         self.refresh_file_list()
-        self.statusMessage.emit(f"从文件夹导入 {copied} 张图像")
+        self.statusMessage.emit(
+            f"从文件夹导入 {copied} 张图像" + self._conflict_note(warnings)
+        )
+        self._show_import_warnings(warnings)
         self.imagesChanged.emit()
 
     def _is_yolo_dataset(self, folder: Path) -> bool:
@@ -824,7 +956,8 @@ class AnnotateTab(QtWidgets.QWidget):
         answer = QtWidgets.QMessageBox.question(
             self,
             "替换数据集",
-            "导入新数据集会清空当前项目的所有图像与标注，是否继续？",
+            "导入新数据集会清空当前项目的所有图像与标注。\n"
+            "旧数据会移入项目 .trash/ 目录，可随时手动找回。是否继续？",
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
@@ -858,34 +991,25 @@ class AnnotateTab(QtWidgets.QWidget):
         return False
 
     def _clear_dataset(self) -> None:
-        for directory in (self._project.images_dir, self._project.annotations_dir):
-            if directory.exists():
-                shutil.rmtree(directory)
-            directory.mkdir(parents=True, exist_ok=True)
+        """清空当前数据集；旧数据整体移入 .trash/<时间戳>/，可随时找回。"""
+        importer.clear_dataset_files(self._project)
+        # 换新数据集 = 换词表：老标签与译名登记表一并清掉，防止旧类别串进新图集
+        if self._project.labels or self._project.label_translations:
+            self._project.labels = []
+            self._project.label_translations = {}
+            self._project.save()
+            self.labelsChanged.emit([])
 
-    def _copy_image_with_annotation(self, src: Path, target: Path) -> set[str]:
-        shutil.copy2(src, target)
-        labels: set[str] = set()
-        json_src = src.with_suffix(".json")
-        if json_src.exists():
-            json_target = self._project.annotations_dir / f"{target.stem}.json"
-            json_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(json_src, json_target)
-            labels = self._labels_from_json(json_src)
-        return labels
-
-    def _labels_from_json(self, json_path: Path) -> set[str]:
-        labels: set[str] = set()
-        try:
-            with open(json_path, encoding="utf-8") as f:
-                data = json.load(f)
-            for shape in data.get("shapes") or []:
-                label = shape.get("label")
-                if label:
-                    labels.add(str(label))
-        except (OSError, ValueError, TypeError):
-            pass
-        return labels
+    def _apply_viewport_theme(self, dark: bool) -> None:
+        """标注视口留白使用主题 viewport 色（QSS 管不到自绘区域）。"""
+        viewport = self._scroll.viewport()
+        viewport.setAutoFillBackground(True)
+        pal = viewport.palette()
+        pal.setColor(
+            QtGui.QPalette.ColorRole.Window,
+            QtGui.QColor(_theme.VIEWPORT_DARK if dark else _theme.VIEWPORT_LIGHT),
+        )
+        viewport.setPalette(pal)
 
     def _merge_imported_labels(self, labels: set[str]) -> None:
         if labels and self._project.add_labels(sorted(labels)):
@@ -901,7 +1025,7 @@ class AnnotateTab(QtWidgets.QWidget):
             self,
             "删除当前图像",
             f"确定删除当前图像「{image_path.name}」吗？\n\n"
-            "图像文件与对应的标注文件都会被永久删除。",
+            "图像文件与对应的标注文件会移入项目 .trash/ 目录，可手动找回。",
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
@@ -909,13 +1033,23 @@ class AnnotateTab(QtWidgets.QWidget):
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
 
+        trash = importer.new_trash_dir(self._project)
         errors: list[str] = []
-        for path in (self._label_path(image_path), image_path):
+        for path, bucket in (
+            (self._label_path(image_path), "annotations"),
+            (image_path, "images"),
+        ):
+            if not path.exists():
+                continue
             try:
-                if path.exists():
-                    path.unlink()
+                importer.move_into(trash, path, bucket)
             except OSError as exc:
                 errors.append(f"{path.name}: {exc}")
+        if errors:
+            QtWidgets.QMessageBox.warning(
+                self, "删除失败", "部分文件移动失败：\n" + "\n".join(errors)
+            )
+            return
 
         self._items.pop(old_index)
         self._file_list.blockSignals(True)

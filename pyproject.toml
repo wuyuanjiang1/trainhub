@@ -6,6 +6,12 @@ build-backend = "setuptools.build_meta"
 name = "trainhub"
 version = "0.1.0"
 description = "基于 PyQt6 的一站式标注与训练工作站（YOLO / nnU-Net，可扩展）"
+license = { text = "GPL-3.0-only" }
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
 requires-python = ">=3.10"
 dependencies = [
     "PyQt6>=6.6",

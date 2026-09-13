@@ -11,6 +11,7 @@ import json
 import math
 import os
 import shutil
+from datetime import datetime
 from pathlib import Path
 
 import imgviz
@@ -155,6 +156,8 @@ class AnnotateTab(QtWidgets.QWidget):
         self._prelabel_new_labels: set[str] = set()
         self._prelabel_written = 0
         self._prelabel_applied = 0
+        self._prelabel_empty: list[str] = []
+        self._prelabel_issues: list[tuple[str, str]] = []
 
         self._label_dialog = LabelDialog(
             text="输入或选择标签",
@@ -748,6 +751,7 @@ class AnnotateTab(QtWidgets.QWidget):
         worker.image_ready.connect(self._on_prelabel_image_ready)
         worker.file_done.connect(self._on_prelabel_file_done)
         worker.file_empty.connect(self._on_prelabel_file_empty)
+        worker.file_skipped.connect(self._on_prelabel_skipped)
         worker.failed.connect(self._on_prelabel_failed)
         worker.finished.connect(self._on_prelabel_finished)
         self._prelabel_worker = worker
@@ -756,6 +760,7 @@ class AnnotateTab(QtWidgets.QWidget):
         self._prelabel_written = 0
         self._prelabel_applied = 0
         self._prelabel_empty: list[str] = []
+        self._prelabel_issues = []
         self._prelabel_dialog.begin_run(len(params["jobs"]), note)
         if params["write"]:
             self.statusMessage.emit("AI 预标注：批量推理中 …")
@@ -796,6 +801,10 @@ class AnnotateTab(QtWidgets.QWidget):
 
     def _on_prelabel_file_empty(self, image_path: str) -> None:
         self._prelabel_empty.append(image_path)
+
+    def _on_prelabel_skipped(self, image_path: str, reason: str) -> None:
+        self._prelabel_issues.append((Path(image_path).name, reason))
+        self.statusMessage.emit(f"AI 预标注跳过 {Path(image_path).name}：{reason}")
 
     def _refresh_prelabel_stats(self, *_args: object) -> None:
         """每处理完一张，刷新对话框里的 token / 检出率 / 费用标识。"""
@@ -840,6 +849,10 @@ class AnnotateTab(QtWidgets.QWidget):
         if short:
             return head + (f"，{empty_count} 张未检出候选" if empty_count else "")
         message = f"完成，共为 {self._prelabel_written} 张图像写入候选标注。"
+        if self._prelabel_issues:
+            sample = "；".join(f"{n}（{r}）" for n, r in self._prelabel_issues[:3])
+            more = f" 等 {len(self._prelabel_issues)} 项" if len(self._prelabel_issues) > 3 else ""
+            message += f"\n⚠ 跳过 {len(self._prelabel_issues)} 张：{sample}{more}。"
         if not self._prelabel_empty:
             return message + "\n候选可能有漏检/误检，请逐张检查微调后保存。"
         sample = "、".join(
@@ -861,6 +874,57 @@ class AnnotateTab(QtWidgets.QWidget):
             self._project.save()
             self.labelsChanged.emit(list(self._project.labels))
 
+    def _import_one(
+        self, src: Path, used: dict[str, str], warnings: list[str]
+    ) -> set[str]:
+        """复制一张图像（连同同名 JSON）进项目，返回带进来的标签集。
+
+        used 是项目内已占用的 stem→后缀 表，随导入更新。命名冲突策略：
+        - 同名同后缀重复：改名 name_2、name_3…，JSON 一并改名（归属明确）；
+        - 同名不同后缀（cat.png 与 cat.jpg）：改名导入但不携带标注——
+          同一个 cat.json 无法判断属于哪张图，宁可丢标注也不标错图。
+        """
+        images_dir = self._project.images_dir
+        stem, suffix = src.stem, src.suffix.lower()
+        candidate = stem
+        renamed = 0
+        while candidate in used:
+            renamed += 1
+            candidate = f"{stem}_{renamed}"
+        target = images_dir / f"{candidate}{src.suffix}"
+        shutil.copy2(src, target)
+        used[candidate] = suffix
+
+        labels: set[str] = set()
+        json_src = src.with_suffix(".json")
+        ambiguous = renamed > 0 and used.get(stem) != suffix
+        if json_src.exists() and ambiguous:
+            warnings.append(
+                f"{src.name} 与已有图像 {stem}{used.get(stem, '')} 同名（后缀不同），"
+                f"已改名为 {target.name} 且未携带标注（{json_src.name} 归属不明确）"
+            )
+            return labels
+        if json_src.exists():
+            json_target = self._project.annotations_dir / f"{candidate}.json"
+            json_target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(json_src, json_target)
+            labels = self._labels_from_json(json_src)
+        if renamed:
+            note = "标注一并改名" if json_src.exists() and not ambiguous else "无标注"
+            warnings.append(f"{src.name} 与已有图像重名，已改名为 {target.name}（{note}）")
+        return labels
+
+    def _conflict_note(self, warnings: list[str]) -> str:
+        return f"（{len(warnings)} 条命名冲突已自动改名）" if warnings else ""
+
+    def _show_import_warnings(self, warnings: list[str]) -> None:
+        if not warnings:
+            return
+        body = "\n".join(warnings[:8])
+        if len(warnings) > 8:
+            body += f"\n…共 {len(warnings)} 条"
+        QtWidgets.QMessageBox.warning(self, "导入完成（存在命名冲突）", body)
+
     def import_images(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(
             self, "选择图像", "", "图像 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff)"
@@ -868,18 +932,23 @@ class AnnotateTab(QtWidgets.QWidget):
         if not paths:
             return
         self._project.images_dir.mkdir(parents=True, exist_ok=True)
+        used = {
+            p.stem: p.suffix.lower()
+            for p in self._project.images_dir.iterdir()
+            if p.is_file()
+        }
         imported_labels: set[str] = set()
         imported = 0
+        warnings: list[str] = []
         for path in paths:
-            src = Path(path)
-            target = self._project.images_dir / src.name
-            if target.exists():
-                continue
-            imported_labels |= self._copy_image_with_annotation(src, target)
+            imported_labels |= self._import_one(Path(path), used, warnings)
             imported += 1
         self._merge_imported_labels(imported_labels)
         self.refresh_file_list()
-        self.statusMessage.emit(f"已导入 {imported} 张图像")
+        self.statusMessage.emit(
+            f"已导入 {imported} 张图像" + self._conflict_note(warnings)
+        )
+        self._show_import_warnings(warnings)
         self.imagesChanged.emit()
 
     def import_folder(self) -> None:
@@ -897,17 +966,23 @@ class AnnotateTab(QtWidgets.QWidget):
 
         imported_labels: set[str] = set()
         copied = 0
+        warnings: list[str] = []
+        used = {
+            p.stem: p.suffix.lower()
+            for p in self._project.images_dir.iterdir()
+            if p.is_file()
+        } if self._project.images_dir.exists() else {}
         self._project.images_dir.mkdir(parents=True, exist_ok=True)
         for path in sorted(folder.rglob("*")):
             if path.is_file() and path.suffix.lower() in IMAGE_SUFFIXES:
-                target = self._project.images_dir / path.name
-                if target.exists():
-                    continue
-                imported_labels |= self._copy_image_with_annotation(path, target)
+                imported_labels |= self._import_one(path, used, warnings)
                 copied += 1
         self._merge_imported_labels(imported_labels)
         self.refresh_file_list()
-        self.statusMessage.emit(f"从文件夹导入 {copied} 张图像")
+        self.statusMessage.emit(
+            f"从文件夹导入 {copied} 张图像" + self._conflict_note(warnings)
+        )
+        self._show_import_warnings(warnings)
         self.imagesChanged.emit()
 
     def _is_yolo_dataset(self, folder: Path) -> bool:
@@ -919,7 +994,8 @@ class AnnotateTab(QtWidgets.QWidget):
         answer = QtWidgets.QMessageBox.question(
             self,
             "替换数据集",
-            "导入新数据集会清空当前项目的所有图像与标注，是否继续？",
+            "导入新数据集会清空当前项目的所有图像与标注。\n"
+            "旧数据会移入项目 .trash/ 目录，可随时手动找回。是否继续？",
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
@@ -952,28 +1028,44 @@ class AnnotateTab(QtWidgets.QWidget):
                 return True
         return False
 
+    def _trash_target(self) -> Path:
+        """本项目本次操作的垃圾桶目录 .trash/<时间戳>/。"""
+        trash = self._project.root / ".trash" / datetime.now().strftime("%Y%m%d-%H%M%S")
+        trash.mkdir(parents=True, exist_ok=True)
+        return trash
+
+    def _move_into(self, trash: Path, path: Path, bucket: str) -> None:
+        """把文件或目录移入 trash/bucket/ 保留原名；跨设备时回退为复制后删除。"""
+        target = trash / bucket / path.name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            path.rename(target)
+        except OSError:
+            if path.is_dir():
+                shutil.copytree(path, target, dirs_exist_ok=True)
+                shutil.rmtree(path)
+            else:
+                shutil.copy2(path, target)
+                path.unlink(missing_ok=True)
+
     def _clear_dataset(self) -> None:
-        for directory in (self._project.images_dir, self._project.annotations_dir):
-            if directory.exists():
-                shutil.rmtree(directory)
-            directory.mkdir(parents=True, exist_ok=True)
+        """清空当前数据集；旧数据整体移入 .trash/<时间戳>/，可随时找回。"""
+        trash = self._trash_target()
+        for directory, bucket in (
+            (self._project.images_dir, "images"),
+            (self._project.annotations_dir, "annotations"),
+        ):
+            if not directory.exists():
+                directory.mkdir(parents=True, exist_ok=True)
+                continue
+            for child in sorted(directory.iterdir()):
+                self._move_into(trash, child, bucket)
         # 换新数据集 = 换词表：老标签与译名登记表一并清掉，防止旧类别串进新图集
         if self._project.labels or self._project.label_translations:
             self._project.labels = []
             self._project.label_translations = {}
             self._project.save()
             self.labelsChanged.emit([])
-
-    def _copy_image_with_annotation(self, src: Path, target: Path) -> set[str]:
-        shutil.copy2(src, target)
-        labels: set[str] = set()
-        json_src = src.with_suffix(".json")
-        if json_src.exists():
-            json_target = self._project.annotations_dir / f"{target.stem}.json"
-            json_target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(json_src, json_target)
-            labels = self._labels_from_json(json_src)
-        return labels
 
     def _labels_from_json(self, json_path: Path) -> set[str]:
         labels: set[str] = set()
@@ -1002,7 +1094,7 @@ class AnnotateTab(QtWidgets.QWidget):
             self,
             "删除当前图像",
             f"确定删除当前图像「{image_path.name}」吗？\n\n"
-            "图像文件与对应的标注文件都会被永久删除。",
+            "图像文件与对应的标注文件会移入项目 .trash/ 目录，可手动找回。",
             QtWidgets.QMessageBox.StandardButton.Yes
             | QtWidgets.QMessageBox.StandardButton.No,
             QtWidgets.QMessageBox.StandardButton.No,
@@ -1010,13 +1102,23 @@ class AnnotateTab(QtWidgets.QWidget):
         if answer != QtWidgets.QMessageBox.StandardButton.Yes:
             return
 
+        trash = self._trash_target()
         errors: list[str] = []
-        for path in (self._label_path(image_path), image_path):
+        for path, bucket in (
+            (self._label_path(image_path), "annotations"),
+            (image_path, "images"),
+        ):
+            if not path.exists():
+                continue
             try:
-                if path.exists():
-                    path.unlink()
+                self._move_into(trash, path, bucket)
             except OSError as exc:
                 errors.append(f"{path.name}: {exc}")
+        if errors:
+            QtWidgets.QMessageBox.warning(
+                self, "删除失败", "部分文件移动失败：\n" + "\n".join(errors)
+            )
+            return
 
         self._items.pop(old_index)
         self._file_list.blockSignals(True)

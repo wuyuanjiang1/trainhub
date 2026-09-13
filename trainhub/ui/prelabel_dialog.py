@@ -11,6 +11,7 @@ QSettings，绝不写入项目目录（trainhub.yaml 会被整目录拷贝分享
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 from PyQt6 import QtCore
@@ -97,6 +98,7 @@ class PrelabelWorker(QtCore.QThread):
     image_ready = QtCore.pyqtSignal(str, list)  # 单图模式：图像路径 + shape 字典
     file_done = QtCore.pyqtSignal(str, int, list)  # 批量模式：路径 / 形状数 / 标签
     file_empty = QtCore.pyqtSignal(str)  # 批量模式：该图未检出任何候选
+    file_skipped = QtCore.pyqtSignal(str, str)  # 批量模式：路径 / 跳过原因
     failed = QtCore.pyqtSignal(str)
 
     def __init__(
@@ -111,6 +113,7 @@ class PrelabelWorker(QtCore.QThread):
         self._jobs = jobs
         self._predict = predict_fn
         self._write = write_to_disk
+        self._snapshot = time.time()  # 任务快照时刻，晚于它的标注改动不再覆盖
         self._cancelled = False
 
     def cancel(self) -> None:
@@ -122,7 +125,30 @@ class PrelabelWorker(QtCore.QThread):
             for index, (image_path, label_path) in enumerate(self._jobs):
                 if self._cancelled:
                     return
-                shapes = self._predict(image_path)
+                name = Path(image_path).name
+                if not image_path.exists():
+                    self.file_skipped.emit(str(image_path), "图像已被删除")
+                    self.progress.emit(index + 1, total, name)
+                    continue
+                if (
+                    self._write
+                    and Path(label_path).exists()
+                    and Path(label_path).stat().st_mtime > self._snapshot
+                ):
+                    # 任务列表是打开对话框时的快照，期间手工保存过的标注不能覆盖
+                    self.file_skipped.emit(
+                        str(image_path), "标注在本次预标注开始后被修改过，已跳过以免覆盖"
+                    )
+                    self.progress.emit(index + 1, total, name)
+                    continue
+                try:
+                    shapes = self._predict(image_path)
+                except Exception as exc:
+                    if index == 0:
+                        raise  # 首张即失败多半是权重/配置问题，整批终止并报错
+                    self.file_skipped.emit(str(image_path), f"推理失败: {exc}")
+                    self.progress.emit(index + 1, total, name)
+                    continue
                 if self._write:
                     if shapes:
                         _write_prelabel(str(image_path), str(label_path), shapes)
@@ -135,8 +161,8 @@ class PrelabelWorker(QtCore.QThread):
                         self.file_empty.emit(str(image_path))
                 else:
                     self.image_ready.emit(str(image_path), shapes)
-                self.progress.emit(index + 1, total, Path(image_path).name)
-        except Exception as exc:  # 模型加载失败 / 权重损坏 / API 调用失败等
+                self.progress.emit(index + 1, total, name)
+        except Exception as exc:
             self.failed.emit(str(exc))
 
 

@@ -34,6 +34,9 @@ from ..annotator.widgets.label_list_widget import LabelListWidgetItem
 from ..annotator.widgets.label_list_widget import format_shape_label
 from ..core.dataset import IMAGE_SUFFIXES
 from ..core.prelabel import find_project_weights
+from ..core.prelabel import predict_shapes
+from ..core.prelabel_vlm import VLM_PROVIDERS
+from ..core.prelabel_vlm import predict_shapes_vlm
 from ..core.project import Project
 from ..trainers.yolo.converter import import_yolo_dataset
 from .prelabel_dialog import PrelabelDialog
@@ -676,11 +679,38 @@ class AnnotateTab(QtWidgets.QWidget):
         self._prelabel_dialog.show()
 
     def _start_prelabel(self, params: dict) -> None:
+        engine = params.get("engine", "yolo")
+        if engine == "vlm":
+            provider = VLM_PROVIDERS[params["provider"]]
+            labels = list(self._project.labels)
+
+            def predict_fn(image_path: Path) -> list[dict]:
+                return predict_shapes_vlm(
+                    str(image_path),
+                    provider=provider,
+                    api_key=params["api_key"],
+                    model=params["model"],
+                    base_url=params["base_url"],
+                    labels=labels,
+                    hint=params.get("hint", ""),
+                )
+
+            note = provider.display_name
+            if params["write"]:
+                note += "；图像将上传至该服务商"
+        else:
+            weights, conf, device = params["weights"], params["conf"], params["device"]
+
+            def predict_fn(image_path: Path) -> list[dict]:
+                return predict_shapes(str(image_path), weights, conf, device=device)
+
+            note = f"计算设备 {params['device']}"
+            if params.get("device_warning"):
+                note += f"；{params['device_warning']}"
+
         worker = PrelabelWorker(
             jobs=params["jobs"],
-            weights=params["weights"],
-            conf=params["conf"],
-            device=params["device"],
+            predict_fn=predict_fn,
             write_to_disk=params["write"],
             parent=self,
         )
@@ -694,9 +724,7 @@ class AnnotateTab(QtWidgets.QWidget):
         self._prelabel_new_labels = set()
         self._prelabel_written = 0
         self._prelabel_applied = 0
-        self._prelabel_dialog.begin_run(
-            len(params["jobs"]), params["device"], params.get("device_warning")
-        )
+        self._prelabel_dialog.begin_run(len(params["jobs"]), note)
         if params["write"]:
             self.statusMessage.emit("AI 预标注：批量推理中 …")
         worker.start()

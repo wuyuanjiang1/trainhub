@@ -5,7 +5,7 @@
 ## 功能特性
 
 - **数据集管理**：批量导入图像文件 / 文件夹；自动识别 labelme JSON 与 YOLO 数据集（`images/` + `labels/` + `dataset.yaml`）；类别分布统计与标注进度一目了然。
-- **标注**：移植自 labelme 6.3.0，支持矩形框、多边形、定向矩形、圆形、点、线、折线等形状标注，产出与 labelme 完全兼容的 JSON。
+- **标注**：移植自 labelme 6.3.0，支持矩形框、多边形、定向矩形、圆形、点、线、折线等形状标注，产出与 labelme 完全兼容的 JSON。内置 AI 预标注：可用本地 YOLO 权重离线推理，也可接入视觉大模型（DeepSeek / 智谱 GLM / 阿里百炼 Qwen-VL 等，OpenAI 兼容接口）自动生成候选框。
 - **训练**：YOLO（目标检测 / 实例分割 / 图像分类）与 nnU-Net（2D 医学图像分割），可视化调参，训练时实时绘制 loss / 指标 / 学习率曲线，自动收集日志与产物，可回看历史运行。
 - **数据转换**：labelme → YOLO 一键导出；导入 YOLO 数据集时自动反向转换为 labelme 格式。
 - **可扩展**：新增训练器只需实现 `BaseTrainer` 并 `@register_trainer` 注册，界面与调参表单自动生成。
@@ -92,11 +92,28 @@ python -m trainhub /path/to/proj   # 打开（或新建）指定项目目录
 - 支持删除当前图像、上/下一张、保存（Ctrl+S）。
 - 标注结果保存为 labelme 兼容的 JSON，存于项目的 `annotations/` 目录。
 
-### 4. 导出数据集（labelme2yolo）
+### 4. AI 预标注（可选）
+
+在「标注」页点击 **AI 预标注**，可为当前图像或全部未标注图像自动生成候选框，人工微调后保存：
+
+- **本地 YOLO 权重（离线）**：使用项目里训练产出的权重（`runs/*/weights/*.pt`）或通用预训练权重推理，数据不出本机。
+- **大模型 API（在线）**：填一个 API Key 即可调用视觉大模型检测框，服务商开箱即用：
+  - DeepSeek（`deepseek-flash`）、智谱 GLM（`glm-4.5v`）、阿里百炼（Qwen-VL）、硅基流动，或任意 OpenAI 兼容接口；
+  - API Key 保存在本机（QSettings），不会写入项目目录；
+  - 模型会按项目标签列表输出候选矩形框，类别之外的目标自动忽略；
+  - ⚠️ 批量模式会把图像内容上传到所选服务商；VLM 输出为矩形框，分割任务请在画布上手工调整。
+
+接入新的服务商前，建议先用脚本验证它的检测框质量（与已有标注比对 IoU）：
+
+```bash
+python scripts/test_vlm_grounding.py --provider deepseek --project /path/to/proj --limit 5
+```
+
+### 5. 导出数据集（labelme2yolo）
 
 在「数据集」页点击 **labelme2yolo 导出**，会把已标注图像转换成 Ultralytics YOLO 格式，输出到项目的 `datasets/yolo_detect/`（训练集/验证集自动按比例切分）。
 
-### 5. 训练
+### 6. 训练
 
 切换到「训练」页：
 

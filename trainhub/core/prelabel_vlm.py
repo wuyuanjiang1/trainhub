@@ -124,6 +124,56 @@ DEFAULT_DETECT_PROMPT = (
     "你是图像数据标注助手。请找出图像中的所有目标物体，逐一用矩形框标出。"
 )
 
+# 判断提示词是否"指令性语句"的标记词；命中则不把提示词当类别清单解析。
+# 允许误放（宁可将指令句不当清单），不允许误杀常见目标名词。"
+_INSTRUCTION_MARKERS = (
+    "标",
+    "找",
+    "输出",
+    "检测",
+    "识别",
+    "忽略",
+    "请",
+    "所有",
+    "完整",
+    "可见",
+    "帮助",
+    "助手",
+    "图像",
+    "图中",
+    "label",
+    "detect",
+)
+
+_MAX_WHITELIST_PROMPT_LEN = 40
+_MAX_WHITELIST_TOKEN_LEN = 12
+
+
+def extract_label_whitelist(prompt: str, *, max_labels: int = 8) -> list[str] | None:
+    """把"裸目标名清单"式的检测提示词解析成类别白名单。
+
+    用户在提示词里只填目标名称（如 ``木棍`` 或 ``木棍、纸箱``）时，这些词
+    就是本次预标注唯一允许的输出标签：提到几种就只允许这几种，模型不得
+    新增类别。提示词为空、是默认模板或含指令性语句（"只标…"、"忽略…"等）
+    时返回 None，维持原有类别逻辑。
+    """
+    text = (prompt or "").strip()
+    if not text or text == DEFAULT_DETECT_PROMPT or len(text) > _MAX_WHITELIST_PROMPT_LEN:
+        return None
+    tokens = [t for t in re.split(r"[,，、;；/\s]+", text) if t]
+    if not 1 <= len(tokens) <= max_labels:
+        return None
+    for token in tokens:
+        if len(token) > _MAX_WHITELIST_TOKEN_LEN:
+            return None
+        if any(marker in token.lower() for marker in _INSTRUCTION_MARKERS):
+            return None
+    deduped: list[str] = []
+    for token in tokens:
+        if token not in deduped:
+            deduped.append(token)
+    return deduped
+
 
 def build_prompt(labels: Sequence[str], hint: str = "", prompt: str = "") -> str:
     """构造检测框 prompt：任务描述（可自定义）+ 标签约束 + 格式要求。
@@ -138,13 +188,17 @@ def build_prompt(labels: Sequence[str], hint: str = "", prompt: str = "") -> str
         lines.append(
             "类别约束：每个目标从以下类别中选择语义对应的一项，"
             "label 用简洁、通用的英文译名输出（同一类别始终用同一个英文词），"
-            "label_cn 原样填写所选类别的名称。类别列表："
+            "label_cn 原样填写所选类别的名称。"
+            "只允许输出这些类别：提示词没提到的目标一律跳过、不得新增标签，"
+            "类别列表里有几种目标就最多输出这几种标签；"
+            "同一类别的多个实例要分别画框。类别列表："
             + json.dumps(shown, ensure_ascii=False)
         )
     else:
         lines.append(
             "类别由你根据图像内容命名：label 必须使用简洁的小写英文单词或短语，"
-            "禁止使用中文。"
+            "禁止使用中文。提示词提到几种目标，就只允许输出这几种标签，"
+            "不得增加提示词未提到的类别；同一类别的多个实例要分别画框。"
         )
     lines += [
         "",
@@ -290,6 +344,17 @@ _BBOX_KEYS = (
 _CONF_KEYS = ("confidence", "conf", "score", "prob", "probability")
 _RESULT_LIST_KEYS = ("detections", "objects", "results", "items", "data", "annotations")
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
+_NON_LABEL_WORD_RE = re.compile(r"[^0-9a-z\u4e00-\u9fff]+")
+
+
+def normalize_english_label(text: str) -> str:
+    """把模型输出的标注词归一成稳定形式：小写、非字母数字并成下划线。
+
+    "Wooden Stick" / "wooden stick" / "wooden_stick" 都归一为
+    ``wooden_stick``，避免同一目标因空格/大小写/连字符差异分裂成多个标签。
+    """
+    cleaned = _NON_LABEL_WORD_RE.sub("_", str(text).strip().lower()).strip("_")
+    return cleaned or "object"
 
 # Qwen grounding 的另一种输出：<ref>标签</ref><box>(x1,y1),(x2,y2)</box>
 _QWEN_BOX_RE = re.compile(
@@ -311,11 +376,13 @@ def parse_detections(
     coord_system: str = "norm1000",
     scale: float = 1.0,
     allowed_labels: Sequence[str] | None = None,
+    label_translator: "Callable[[str | None, str], str] | None" = None,
 ) -> tuple[list[dict], list[str]]:
     """把模型回复解析成 labelme shape 字典列表。
 
     返回 (shapes, warnings)。width/height 是原图尺寸；输出坐标始终落在
-    原图像素范围内。shape 的 ``label`` 是模型输出的英文标注词，项目类别
+    原图像素范围内。shape 的 ``label`` 是模型输出的英文标注词（若提供
+    ``label_translator``，会先归一/映射成项目内唯一的标准名），项目类别
     原名称（如有）存在 ``other_data.label_cn`` 便于对照。无法解析的条目
     跳过并记入 warnings，不抛异常。
     """
@@ -349,8 +416,16 @@ def parse_detections(
                 dropped_labels.add(check)
                 continue
 
+        # 归一/映射成项目内唯一的标准名（模型对同一目标的英文写法不稳定）
+        final_label = label
+        if label_translator is not None:
+            try:
+                final_label = str(label_translator(reference, label)) or label
+            except Exception:
+                final_label = label
+
         other_data: dict = {}
-        if reference and reference != label:
+        if reference and reference != final_label:
             other_data["label_cn"] = reference
 
         pixels = _to_pixels(values, width=width, height=height,
@@ -360,9 +435,9 @@ def parse_detections(
             continue
         x1, y1, x2, y2 = pixels
         if x2 - x1 < 2 or y2 - y1 < 2:
-            warnings.append(f"跳过过小的目标框: {label}")
+            warnings.append(f"跳过过小的目标框: {final_label}")
             continue
-        shapes.append(_shape_dict(label, x1, y1, x2, y2, confidence, other_data))
+        shapes.append(_shape_dict(final_label, x1, y1, x2, y2, confidence, other_data))
 
     if dropped_labels:
         warnings.append(
@@ -636,11 +711,15 @@ def predict_shapes_vlm(
     max_side: int = 1600,
     timeout: float = 90.0,
     retries: int = 2,
+    label_translator: "Callable[[str | None, str], str] | None" = None,
 ) -> list[dict]:
     """对单张图像调用视觉大模型，返回候选标注（labelme shape 字典）。
 
-    ``prompt`` 为自定义检测任务描述，留空用默认的标框提示词；
-    ``labels`` 为项目标签列表：非空时只保留这些类别，空列表表示自由命名。
+    ``prompt`` 为自定义检测任务描述，留空用默认的标框提示词；提示词是裸
+    目标名清单（如"木棍"或"木棍、纸箱"）时，这些词成为唯一允许的标签：
+    提到几种就最多输出几种，多出的标签在解析时被强制丢弃。
+    ``labels`` 为项目标签列表（提示词清单优先于它）：非空时只保留这些
+    类别，两者都为空表示自由命名。
     解析失败抛 :class:`VLMError`；个别目标框解析失败只记 warning 并跳过。
     """
     if not api_key or not api_key.strip():
@@ -652,12 +731,13 @@ def predict_shapes_vlm(
     if not model:
         raise VLMError("模型名为空，请填写要调用的视觉模型名称")
 
+    effective_labels = extract_label_whitelist(prompt) or list(labels)
     image_b64, width, height, scale = _encode_image(image_path, max_side=max_side)
     content = _chat_completion(
         base_url=base,
         api_key=api_key.strip(),
         model=model,
-        prompt=build_prompt(labels=labels, hint=hint, prompt=prompt),
+        prompt=build_prompt(labels=effective_labels, hint=hint, prompt=prompt),
         image_b64=image_b64,
         timeout=timeout,
         retries=retries,
@@ -670,7 +750,8 @@ def predict_shapes_vlm(
         height=height,
         coord_system=provider.coord_system,
         scale=scale,
-        allowed_labels=labels if labels else None,
+        allowed_labels=effective_labels or None,
+        label_translator=label_translator,
     )
     return shapes
 

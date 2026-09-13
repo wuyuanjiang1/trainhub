@@ -267,7 +267,9 @@ class PrelabelDialog(QtWidgets.QDialog):
         self._prompt_edit = QtWidgets.QPlainTextEdit(DEFAULT_DETECT_PROMPT)
         self._prompt_edit.setFixedHeight(58)
         self._prompt_edit.setToolTip(
-            "检测任务描述（标什么、怎么标）。留空则使用默认提示词；"
+            "检测任务描述（标什么、怎么标），留空用默认。\n"
+            "只填目标名称（空格/逗号分隔，如「木棍」或「木棍、纸箱」）时，"
+            "这些词就是唯一允许的输出标签：提到几种就最多几种，多出的会被程序丢弃。\n"
             "坐标与 JSON 输出格式由程序自动附加，无需手写。"
         )
         restore_button = QtWidgets.QPushButton("默认")

@@ -20,7 +20,6 @@ from PyQt6 import QtWidgets
 from ..annotator.label_file import write_label_file
 from ..core.devices import DEVICE_CHOICES
 from ..core.devices import validate_device
-from ..core.prelabel import predict_shapes
 from ..core.prelabel_vlm import DEFAULT_DETECT_PROMPT
 from ..core.prelabel_vlm import ENV_KEYS
 from ..core.prelabel_vlm import VLM_PROVIDERS

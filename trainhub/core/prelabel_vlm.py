@@ -23,8 +23,6 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from dataclasses import field
-from pathlib import Path
 from typing import Any
 from typing import Callable
 from typing import Sequence

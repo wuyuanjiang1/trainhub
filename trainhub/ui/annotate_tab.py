@@ -33,8 +33,11 @@ from ..annotator._qt import add_actions
 from ..annotator.widgets.label_list_widget import LabelListWidgetItem
 from ..annotator.widgets.label_list_widget import format_shape_label
 from ..core.dataset import IMAGE_SUFFIXES
+from ..core.prelabel import find_project_weights
 from ..core.project import Project
 from ..trainers.yolo.converter import import_yolo_dataset
+from .prelabel_dialog import PrelabelDialog
+from .prelabel_dialog import PrelabelWorker
 from .theme import section_label
 
 LABEL_COLORMAP = imgviz.label_colormap()
@@ -138,6 +141,11 @@ class AnnotateTab(QtWidgets.QWidget):
         self._dirty = False
         self._zoom_mode = "fit"
         self._shape_clipboard = ShapeClipboard(self)
+        self._prelabel_dialog: PrelabelDialog | None = None
+        self._prelabel_worker: PrelabelWorker | None = None
+        self._prelabel_new_labels: set[str] = set()
+        self._prelabel_written = 0
+        self._prelabel_applied = 0
 
         self._label_dialog = LabelDialog(
             text="输入或选择标签",
@@ -229,6 +237,14 @@ class AnnotateTab(QtWidgets.QWidget):
             self.delete_selected_shapes,
             "Delete",
             "删除选中的标注",
+            enabled=False,
+        )
+        self._prelabel_action = _new_action(
+            self,
+            "AI 预标注",
+            self.open_prelabel_dialog,
+            "Ctrl+Shift+P",
+            "用 YOLO 模型自动生成候选标注，可单张或批量（Ctrl+Shift+P）",
             enabled=False,
         )
         self._edit_label_action = _new_action(
@@ -355,6 +371,8 @@ class AnnotateTab(QtWidgets.QWidget):
             None,
             self._save_action,
             self._delete_image_action,
+            None,
+            self._prelabel_action,
             None,
             self._edit_mode_action,
             self._duplicate_action,
@@ -572,6 +590,7 @@ class AnnotateTab(QtWidgets.QWidget):
         self._zoom_out_action.setEnabled(True)
         self._zoom_org_action.setEnabled(True)
         self._fit_action.setEnabled(True)
+        self._prelabel_action.setEnabled(True)
 
     def save_current(self) -> bool:
         if self._image_path is None:
@@ -618,6 +637,134 @@ class AnnotateTab(QtWidgets.QWidget):
         self.set_dirty(False)
         self.statusMessage.emit(f"已保存 {label_path.name}")
         return True
+
+    # ------------------------------------------------------------ AI 预标注
+    def open_prelabel_dialog(self) -> None:
+        if not self._items:
+            QtWidgets.QMessageBox.information(self, "AI 预标注", "请先导入图像。")
+            return
+        if self._prelabel_worker is not None and self._prelabel_worker.isRunning():
+            return
+
+        weight_options: list[tuple[str, str]] = [
+            (f"{w.parent.parent.name} / {w.name}（项目训练）", str(w))
+            for w in find_project_weights(self._project.root)
+        ]
+        weight_options.append(("yolo11n.pt（通用预训练）", "yolo11n.pt"))
+        current_image = str(self._image_path) if self._image_path else None
+        unlabeled = sum(1 for p in self._items if not self._label_path(p).exists())
+
+        def job_provider(scope: str) -> list[tuple[Path, Path]]:
+            if scope == "current":
+                if self._image_path is None:
+                    return []
+                return [(self._image_path, self._label_path(self._image_path))]
+            return [
+                (p, self._label_path(p))
+                for p in self._items
+                if not self._label_path(p).exists()
+            ]
+
+        self._prelabel_dialog = PrelabelDialog(
+            self,
+            weight_options=weight_options,
+            current_image=current_image,
+            unlabeled_count=unlabeled,
+            job_provider=job_provider,
+        )
+        self._prelabel_dialog.start_requested.connect(self._start_prelabel)
+        self._prelabel_dialog.show()
+
+    def _start_prelabel(self, params: dict) -> None:
+        worker = PrelabelWorker(
+            jobs=params["jobs"],
+            weights=params["weights"],
+            conf=params["conf"],
+            device=params["device"],
+            write_to_disk=params["write"],
+            parent=self,
+        )
+        worker.progress.connect(self._prelabel_dialog.on_progress)
+        worker.image_ready.connect(self._on_prelabel_image_ready)
+        worker.file_done.connect(self._on_prelabel_file_done)
+        worker.failed.connect(self._on_prelabel_failed)
+        worker.finished.connect(self._on_prelabel_finished)
+        self._prelabel_worker = worker
+        self._prelabel_dialog.worker = worker
+        self._prelabel_new_labels = set()
+        self._prelabel_written = 0
+        self._prelabel_applied = 0
+        self._prelabel_dialog.begin_run(
+            len(params["jobs"]), params["device"], params.get("device_warning")
+        )
+        if params["write"]:
+            self.statusMessage.emit("AI 预标注：批量推理中 …")
+        worker.start()
+
+    def _on_prelabel_image_ready(self, image_path: str, shape_dicts: list) -> None:
+        if self._image_path is None or str(self._image_path) != image_path:
+            return
+        new_shapes = [dict_to_shape(raw) for raw in shape_dicts]
+        if not new_shapes:
+            self.statusMessage.emit("AI 预标注：本图未检出候选对象，可尝试调低置信度")
+            return
+        self._canvas.load_shapes(shapes=new_shapes, replace=False)
+        self._label_list.clear()
+        self._load_shapes(self._canvas.shapes)
+        self.set_dirty(True)
+        self._undo_action.setEnabled(self._canvas.can_restore_shape)
+        self._prelabel_applied += len(new_shapes)
+        self._register_prelabel_labels({s.label for s in new_shapes if s.label})
+        self.statusMessage.emit(
+            f"AI 预标注：当前图新增 {len(new_shapes)} 个候选，请检查微调后保存"
+        )
+
+    def _on_prelabel_file_done(self, image_path: str, count: int, labels: list) -> None:
+        self._prelabel_written += 1
+        self._prelabel_new_labels.update(label for label in labels if label)
+        try:
+            row = self._items.index(Path(image_path))
+        except ValueError:
+            return
+        item = self._file_list.item(row)
+        if item is not None:
+            font = item.font()
+            font.setBold(True)
+            item.setFont(font)
+            item.setToolTip("已标注（AI 预标注）")
+
+    def _on_prelabel_failed(self, message: str) -> None:
+        self.statusMessage.emit(f"AI 预标注失败: {message}")
+        QtWidgets.QMessageBox.critical(self, "AI 预标注失败", message)
+
+    def _on_prelabel_finished(self) -> None:
+        worker = self._prelabel_worker
+        cancelled = bool(worker is not None and getattr(worker, "_cancelled", False))
+        self._register_prelabel_labels(self._prelabel_new_labels)
+        dialog = self._prelabel_dialog
+        if dialog is not None:
+            dialog.on_finished()
+            if cancelled:
+                dialog.mark_done("已停止。已处理的图像保持有效。")
+            elif worker is not None and getattr(worker, "_write", False):
+                dialog.mark_done(
+                    f"完成，共为 {self._prelabel_written} 张图像写入候选标注。\n"
+                    "候选可能有漏检/误检，请逐张检查微调后保存。"
+                )
+            else:
+                dialog.mark_done(
+                    f"完成，已在当前图像添加 {self._prelabel_applied} 个候选标注。\n"
+                    "请检查微调后保存；不满意可点撤销。"
+                )
+        self.statusMessage.emit(
+            "AI 预标注已停止" if cancelled else f"AI 预标注完成：{self._prelabel_written} 张"
+        )
+        self._prelabel_worker = None
+
+    def _register_prelabel_labels(self, labels: set[str]) -> None:
+        if labels and self._project.add_labels(sorted(labels)):
+            self._project.save()
+            self.labelsChanged.emit(list(self._project.labels))
 
     def import_images(self) -> None:
         paths, _ = QtWidgets.QFileDialog.getOpenFileNames(

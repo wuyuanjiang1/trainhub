@@ -126,17 +126,26 @@ DEFAULT_DETECT_PROMPT = (
 
 
 def build_prompt(labels: Sequence[str], hint: str = "", prompt: str = "") -> str:
-    """构造检测框 prompt：任务描述（可自定义）+ 标签约束 + 格式要求。"""
+    """构造检测框 prompt：任务描述（可自定义）+ 标签约束 + 格式要求。
+
+    标注词（label）统一要求英文输出：项目标签可能是中文，由模型给出英文
+    译名并在 ``label_cn`` 里回传原类别名，白名单校验与中英对照都靠它。
+    """
     task = prompt.strip() or DEFAULT_DETECT_PROMPT
     lines = [task, ""]
     if labels:
         shown = list(labels)[:MAX_PROMPT_LABELS]
         lines.append(
-            "只允许使用以下类别（原样输出，不要翻译或改写）："
+            "类别约束：每个目标从以下类别中选择语义对应的一项，"
+            "label 用简洁、通用的英文译名输出（同一类别始终用同一个英文词），"
+            "label_cn 原样填写所选类别的名称。类别列表："
             + json.dumps(shown, ensure_ascii=False)
         )
     else:
-        lines.append("类别由你根据图像内容命名，使用简洁的名词。")
+        lines.append(
+            "类别由你根据图像内容命名：label 必须使用简洁的小写英文单词或短语，"
+            "禁止使用中文。"
+        )
     lines += [
         "",
         "坐标要求：使用 0-1000 的归一化坐标（相对图像宽度和高度），",
@@ -144,7 +153,8 @@ def build_prompt(labels: Sequence[str], hint: str = "", prompt: str = "") -> str
         "框要紧贴目标边缘；同一个目标只输出一个框，不要把多个同类目标合并。",
         "",
         "只输出一个 JSON 数组，不要输出任何解释文字、Markdown 代码块或其他内容。格式：",
-        '[{"label": "类别名", "bbox_2d": [x1, y1, x2, y2], "confidence": 0.85}]',
+        '[{"label": "cat", "label_cn": "猫", "bbox_2d": [x1, y1, x2, y2], "confidence": 0.85}]',
+        "label 必须是英文；label_cn 仅在提供了类别列表时填写列表中的原名称，否则省略。",
     ]
     if hint.strip():
         lines += ["", f"补充要求：{hint.strip()}"]
@@ -254,6 +264,18 @@ def _extract_content(body: dict) -> str:
 
 # -------------------------------------------------------------------- parsing
 _LABEL_KEYS = ("label", "name", "class", "category", "标签", "类别", "type")
+# label_cn 是模型回传的"项目类别原名称"（可能为中文），用于白名单校验与对照
+_REFERENCE_KEYS = (
+    "label_cn",
+    "label_zh",
+    "category_cn",
+    "class_cn",
+    "original_label",
+    "原始类别",
+    "中文类别",
+    "类别",
+    "标签",
+)
 _BBOX_KEYS = (
     "bbox_2d",
     "bbox",
@@ -266,6 +288,7 @@ _BBOX_KEYS = (
 )
 _CONF_KEYS = ("confidence", "conf", "score", "prob", "probability")
 _RESULT_LIST_KEYS = ("detections", "objects", "results", "items", "data", "annotations")
+_CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 
 # Qwen grounding 的另一种输出：<ref>标签</ref><box>(x1,y1),(x2,y2)</box>
 _QWEN_BOX_RE = re.compile(
@@ -291,7 +314,9 @@ def parse_detections(
     """把模型回复解析成 labelme shape 字典列表。
 
     返回 (shapes, warnings)。width/height 是原图尺寸；输出坐标始终落在
-    原图像素范围内。无法解析的条目跳过并记入 warnings，不抛异常。
+    原图像素范围内。shape 的 ``label`` 是模型输出的英文标注词，项目类别
+    原名称（如有）存在 ``other_data.label_cn`` 便于对照。无法解析的条目
+    跳过并记入 warnings，不抛异常。
     """
     warnings: list[str] = []
     entries = _extract_entries(text, warnings)
@@ -299,17 +324,34 @@ def parse_detections(
 
     shapes: list[dict] = []
     dropped_labels: set[str] = set()
+    chinese_labels = False
     for entry in entries:
-        label, values, confidence = _parse_entry(entry)
+        label, reference, values, confidence = _parse_entry(entry)
         if values is None:
             warnings.append(f"跳过无法识别坐标的条目: {_short(entry)}")
             continue
         if label is None:
             label = "object"
         label = str(label).strip() or "object"
-        if allowed is not None and label not in allowed:
-            dropped_labels.add(label)
-            continue
+        reference = (str(reference).strip() if reference else "") or None
+
+        # 模型把中英填反了（label 是中文、label_cn 是英文）：换回来
+        if reference and _CJK_RE.search(label) and not _CJK_RE.search(reference):
+            label, reference = reference, label
+        if _CJK_RE.search(label):
+            chinese_labels = True
+
+        # 白名单按项目类别原名称（label_cn）校验；没有回传时退回 label 本身
+        if allowed is not None:
+            check = reference or label
+            if check not in allowed:
+                dropped_labels.add(check)
+                continue
+
+        other_data: dict = {}
+        if reference and reference != label:
+            other_data["label_cn"] = reference
+
         pixels = _to_pixels(values, width=width, height=height,
                             coord_system=coord_system, scale=scale,
                             warnings=warnings)
@@ -319,12 +361,14 @@ def parse_detections(
         if x2 - x1 < 2 or y2 - y1 < 2:
             warnings.append(f"跳过过小的目标框: {label}")
             continue
-        shapes.append(_shape_dict(label, x1, y1, x2, y2, confidence))
+        shapes.append(_shape_dict(label, x1, y1, x2, y2, confidence, other_data))
 
     if dropped_labels:
         warnings.append(
-            "忽略了不属于项目标签的类别: " + "、".join(sorted(dropped_labels))
+            "忽略了不属于项目类别的目标: " + "、".join(sorted(dropped_labels))
         )
+    if chinese_labels:
+        warnings.append("部分标注词仍是中文，未能转换为英文，请人工检查")
     return shapes, warnings
 
 
@@ -430,25 +474,30 @@ def _entries_from_tags(text: str) -> list[dict]:
     return entries
 
 
-def _parse_entry(entry: Any) -> tuple[str | None, list[float] | None, float | None]:
-    """从一条检测结果里取出 (标签, 模型坐标系下的 [x1,y1,x2,y2], 置信度)。"""
+def _parse_entry(
+    entry: Any,
+) -> tuple[str | None, str | None, list[float] | None, float | None]:
+    """取出 (标注词 label, 项目类别原名称 reference, 坐标, 置信度)。"""
     if isinstance(entry, list):
         numbers = [
             float(v) for v in entry if isinstance(v, int | float) and not isinstance(v, bool)
         ]
         if len(numbers) == 4:
-            return None, numbers, None
-        return None, None, None
+            return None, None, numbers, None
+        return None, None, None, None
 
     if not isinstance(entry, dict):
-        return None, None, None
+        return None, None, None, None
 
-    label = None
-    for key in _LABEL_KEYS:
-        value = entry.get(key)
-        if isinstance(value, str) and value.strip():
-            label = value.strip()
-            break
+    def _pick(keys: tuple[str, ...]) -> str | None:
+        for key in keys:
+            value = entry.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return None
+
+    label = _pick(_LABEL_KEYS)
+    reference = _pick(_REFERENCE_KEYS)
 
     confidence = None
     for key in _CONF_KEYS:
@@ -471,7 +520,7 @@ def _parse_entry(entry: Any) -> tuple[str | None, list[float] | None, float | No
                 if flat is not None:
                     values = flat
                     break
-    return label, values, confidence
+    return label, reference, values, confidence
 
 
 def _flatten_bbox(raw: Any) -> list[float] | None:
@@ -550,6 +599,7 @@ def _shape_dict(
     x2: float,
     y2: float,
     confidence: float | None,
+    other_data: dict | None = None,
 ) -> dict:
     return {
         "label": label,
@@ -559,7 +609,7 @@ def _shape_dict(
         "shape_type": "rectangle",
         "flags": {},
         "mask": None,
-        "other_data": {},
+        "other_data": other_data or {},
     }
 
 

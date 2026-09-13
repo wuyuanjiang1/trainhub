@@ -116,6 +116,8 @@ def dict_to_shape(raw: dict) -> Shape:
         group_id=raw.get("group_id"),
         description=raw.get("description") or "",
     )
+    # 保留 VLM 预标注回传的 other_data（如 label_cn 中英对照）
+    shape.other_data = dict(raw.get("other_data") or {})
     shape.points = [
         QtCore.QPointF(float(x), float(y)) for x, y in (raw.get("points") or [])
     ]

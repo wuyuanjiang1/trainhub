@@ -25,13 +25,13 @@ def _boxes(result):
 def test_parse_clean_json_array():
     payload = json.dumps(
         [
-            {"label": "猫", "bbox_2d": [100, 200, 500, 600], "confidence": 0.9},
-            {"label": "狗", "bbox_2d": [600, 100, 900, 400]},
+            {"label": "cat", "bbox_2d": [100, 200, 500, 600], "confidence": 0.9},
+            {"label": "dog", "bbox_2d": [600, 100, 900, 400]},
         ]
     )
     shapes, warnings = parse_detections(payload, width=1000, height=800)
     assert warnings == []
-    assert _labels(shapes) == ["猫", "狗"]
+    assert _labels(shapes) == ["cat", "dog"]
     # 0-1000 归一化 -> 像素
     assert _boxes(shapes)[0] == [[100.0, 160.0], [500.0, 480.0]]
     assert shapes[0]["description"] == "AI 0.90"
@@ -67,10 +67,10 @@ def test_parse_two_point_bbox():
 
 
 def test_parse_qwen_ref_box_tags():
-    text = '<ref>行人</ref><box>(100,200),(300,400)</box> <ref>车</ref><box>(0,0),(500,500)</box>'
+    text = '<ref>person</ref><box>(100,200),(300,400)</box> <ref>car</ref><box>(0,0),(500,500)</box>'
     shapes, warnings = parse_detections(text, width=1000, height=1000)
     assert warnings == []
-    assert _labels(shapes) == ["行人", "车"]
+    assert _labels(shapes) == ["person", "car"]
     assert _boxes(shapes)[0] == [[100.0, 200.0], [300.0, 400.0]]
 
 
@@ -122,11 +122,65 @@ def test_unknown_labels_dropped_when_allowed_given():
     assert any("dog" in w for w in warnings)
 
 
+# --------------------------- 英文标注词 + label_cn 中文对照 ---------------------------
+def test_english_label_with_cn_reference_kept():
+    text = json.dumps(
+        [{"label": "cat", "label_cn": "猫", "bbox_2d": [0, 0, 200, 200], "confidence": 0.8}]
+    )
+    shapes, warnings = parse_detections(text, width=1000, height=1000, allowed_labels=["猫"])
+    assert warnings == []
+    assert _labels(shapes) == ["cat"]
+    assert shapes[0]["other_data"] == {"label_cn": "猫"}
+    assert shapes[0]["description"] == "AI 0.80"
+
+
+def test_reference_equal_label_no_other_data():
+    text = json.dumps([{"label": "cat", "label_cn": "cat", "bbox_2d": [0, 0, 200, 200]}])
+    shapes, _ = parse_detections(text, width=1000, height=1000, allowed_labels=["cat"])
+    assert shapes[0]["other_data"] == {}
+
+
+def test_reference_mismatch_dropped():
+    text = json.dumps(
+        [
+            {"label": "cat", "label_cn": "猫", "bbox_2d": [0, 0, 200, 200]},
+            {"label": "bird", "label_cn": "狗", "bbox_2d": [400, 0, 600, 200]},
+        ]
+    )
+    shapes, warnings = parse_detections(text, width=1000, height=1000, allowed_labels=["猫"])
+    assert _labels(shapes) == ["cat"]
+    assert any("狗" in w for w in warnings)
+
+
+def test_missing_reference_dropped_for_chinese_project_labels():
+    # 项目类别是中文，模型没回传 label_cn，英文 label 无法对应 -> 丢弃
+    text = json.dumps([{"label": "cat", "bbox_2d": [0, 0, 200, 200]}])
+    shapes, warnings = parse_detections(text, width=1000, height=1000, allowed_labels=["猫"])
+    assert shapes == []
+    assert any("cat" in w for w in warnings)
+
+
+def test_swapped_cn_en_fields_fixed():
+    # 模型把中英填反：label 中文、label_cn 英文
+    text = json.dumps([{"label": "猫", "label_cn": "cat", "bbox_2d": [0, 0, 200, 200]}])
+    shapes, warnings = parse_detections(text, width=1000, height=1000, allowed_labels=["猫"])
+    assert warnings == []
+    assert _labels(shapes) == ["cat"]
+    assert shapes[0]["other_data"] == {"label_cn": "猫"}
+
+
+def test_chinese_label_without_reference_warns():
+    text = json.dumps([{"label": "猫", "bbox_2d": [0, 0, 200, 200]}])
+    shapes, warnings = parse_detections(text, width=1000, height=1000)
+    assert _labels(shapes) == ["猫"]  # 不丢框，留给人工处理
+    assert any("中文" in w for w in warnings)
+
+
 def test_free_labeling_when_no_allowed_labels():
-    text = json.dumps([{"label": "螺栓", "bbox_2d": [0, 0, 100, 100]}])
+    text = json.dumps([{"label": "bolt", "bbox_2d": [0, 0, 100, 100]}])
     shapes, warnings = parse_detections(text, width=100, height=100)
     assert warnings == []
-    assert _labels(shapes) == ["螺栓"]
+    assert _labels(shapes) == ["bolt"]
 
 
 def test_tiny_boxes_dropped():
@@ -187,6 +241,16 @@ def test_build_prompt_empty_falls_back_to_default():
 
     assert build_prompt([]).startswith(DEFAULT_DETECT_PROMPT)
     assert build_prompt([], prompt="   ").startswith(DEFAULT_DETECT_PROMPT)
+
+
+def test_build_prompt_requires_english_labels():
+    with_labels = build_prompt(["猫", "狗"])
+    assert "英文" in with_labels
+    assert "label_cn" in with_labels
+    assert '"cat"' in with_labels  # JSON 示例里 label 是英文
+    free = build_prompt([])
+    assert "英文" in free
+    assert "禁止使用中文" in free
 
 
 def test_provider_presets_complete():

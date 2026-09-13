@@ -10,11 +10,15 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from ...core.dataset import scan_dataset
+from ...core.devices import DEVICE_CHOICES
+from ...core.devices import DEVICE_HELP
+from ...core.devices import validate_device
 from ...core.events import EventSink
 from ...core.events import MetricEvent
 from ...core.params import ParamSpec
@@ -66,26 +70,18 @@ _ENTRY_POINTS = {
 }
 
 
-def _resolve_device(choice: str) -> str:
-    if choice != "auto":
-        return choice
-    try:
-        import torch
-
-        if torch.backends.mps.is_available():
-            return "mps"
-        if torch.cuda.is_available():
-            return "cuda"
-    except Exception:
-        pass
-    return "cpu"
-
-
 def _command(name: str) -> list[str]:
-    """Prefer the console script next to the running interpreter."""
-    script = Path(sys.executable).parent / name
-    if script.exists():
-        return [str(script)]
+    """Prefer the console script next to the running interpreter.
+
+    Windows envs put pip scripts in ``Scripts\\`` (as ``.exe``); macOS / Linux
+    keep them beside the interpreter in ``bin/``.  ``shutil.which`` resolves
+    the platform-appropriate executable for both layouts.
+    """
+    search_dirs = [Path(sys.executable).parent / "Scripts", Path(sys.executable).parent]
+    for directory in search_dirs:
+        found = shutil.which(name, path=str(directory))
+        if found:
+            return [found]
     module, func = _ENTRY_POINTS[name]
     return [sys.executable, "-c", f"from {module} import {func}; {func}()"]
 
@@ -194,6 +190,11 @@ def _run(
 ) -> int:
     """Stream a subprocess' combined output, optionally parsing metrics."""
     sink.log(f"$ {' '.join(command)}")
+    popen_kwargs: dict = {}
+    if sys.platform == "win32":
+        # The GUI may run without a console; keep child CLI tools from
+        # flashing empty console windows.
+        popen_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -202,6 +203,7 @@ def _run(
         bufsize=1,
         env=env,
         cwd=str(Path(env["nnUNet_results"]).parent),
+        **popen_kwargs,
     )
     assert process.stdout is not None
 
@@ -290,8 +292,8 @@ class NnunetTrainer(BaseTrainer):
                 type="choice",
                 default="auto",
                 group="训练",
-                choices=("auto", "mps", "cpu"),
-                help="auto 会优先选 mps，其次 cuda，最后 cpu",
+                choices=DEVICE_CHOICES,
+                help=DEVICE_HELP,
             ),
             ParamSpec(
                 key="num_processes",
@@ -340,7 +342,7 @@ class NnunetTrainer(BaseTrainer):
                 type="bool",
                 default=False,
                 group="性能",
-                help="MPS 上不支持，会自动跳过",
+                help="CUDA 设备上收益最大；不支持的设备会自动跳过",
             ),
         ]
 
@@ -428,7 +430,7 @@ class NnunetTrainer(BaseTrainer):
         fold = str(job.params.get("fold", "0"))
         epochs = int(job.params.get("epochs", 250))
         trainer_name = EPOCH_TRAINERS.get(epochs, "nnUNetTrainer")
-        device = _resolve_device(str(job.params.get("device", "auto")))
+        device, device_warning = validate_device(str(job.params.get("device", "auto")))
         raw = Path(meta["nnunet_root"]) / "raw"
         preprocessed = Path(meta["preprocessed"])
         results = Path(meta["results"])
@@ -444,6 +446,8 @@ class NnunetTrainer(BaseTrainer):
             f"nnUNet 训练：数据集 {dataset_id}，配置 {configuration}，fold {fold}，"
             f"轮数 {epochs}（{trainer_name}），设备 {device}"
         )
+        if device_warning:
+            sink.log(device_warning, "warning")
         if device == "mps":
             sink.log(
                 "MPS 提示：nnUNet 并非为 Apple GPU 调优，显存/算子受限时请改用 cpu",

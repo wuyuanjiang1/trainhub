@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import logging
+import re
 import shutil
 from pathlib import Path
 
 from ...core.dataset import scan_dataset
+from ...core.devices import DEVICE_CHOICES
+from ...core.devices import DEVICE_HELP
+from ...core.devices import validate_device
 from ...core.events import EventSink
 from ...core.events import MetricEvent
+from ...core.events import clean_log_text
 from ...core.params import ParamSpec
 from ...core.recorder import MetricRecorder
 from ...core.registry import register_trainer
@@ -35,8 +40,63 @@ _KNOWN_WEIGHTS = (
 )
 
 
+# 每轮摘要固定包含的训练损失项（Ultralytics 键名）。
+_TRAIN_SUMMARY_KEYS = (
+    ("train/box_loss", "box"),
+    ("train/cls_loss", "cls"),
+    ("train/dfl_loss", "dfl"),
+    ("train/loss", "loss"),
+)
+# 验证指标按片段匹配 results_dict 的键（如 "metrics/mAP50(B)"）；顺序重要：
+# "mAP50-95" 必须先于 "mAP50" 匹配，命中过的键不再复用。
+_VAL_SUMMARY_KEYS = (
+    ("mAP50-95", "mAP50-95"),
+    ("mAP50", "mAP50"),
+    ("precision", "P"),
+    ("recall", "R"),
+    ("accuracy_top1", "top1"),
+    ("accuracy_top5", "top5"),
+)
+
+
+def _fmt_metric(value: float) -> str:
+    return f"{value:.4g}"
+
+
+def _epoch_summary(epoch: int, total: int, metrics: dict[str, float]) -> str:
+    """把本轮指标压成一行易读摘要；没有可用指标时返回空串。"""
+    parts: list[str] = []
+    for key, label in _TRAIN_SUMMARY_KEYS:
+        if key in metrics:
+            parts.append(f"{label} {_fmt_metric(metrics[key])}")
+    used: set[str] = set()
+    for fragment, label in _VAL_SUMMARY_KEYS:
+        for key, value in metrics.items():
+            if key in used or not isinstance(value, int | float):
+                continue
+            if fragment in key:
+                parts.append(f"{label} {_fmt_metric(value)}")
+                used.add(key)
+                break
+    if "lr" in metrics:
+        parts.append(f"lr {_fmt_metric(metrics['lr'])}")
+    if not parts:
+        return ""
+    return f"第 {epoch}/{total} 轮 · " + " · ".join(parts)
+
+
 class _SinkLogHandler(logging.Handler):
-    """Forwards Ultralytics' own log records into the GUI log pane."""
+    """Forwards Ultralytics' own log records into the GUI log pane.
+
+    Ultralytics re-prints the epoch table header every epoch, dumps the full
+    ~80-key args dict at startup, and prints one raw validation row per epoch
+    — all noise on top of the charts and the concise per-epoch summary line
+    emitted by the training callback, so those records are dropped here.
+    """
+
+    _EPOCH_HEADER_RE = re.compile(r"^\s*Epoch\s+GPU_mem\s+box_loss")
+    _VAL_ROW_RE = re.compile(r"^\s*all\s+\d+\s+\d+(\s|$)")
+    _ARGS_DUMP_RE = re.compile(r"^engine[/\\]trainer:")
 
     def __init__(self, sink: EventSink) -> None:
         super().__init__()
@@ -44,10 +104,21 @@ class _SinkLogHandler(logging.Handler):
 
     def emit(self, record: logging.LogRecord) -> None:
         try:
-            level = "error" if record.levelno >= logging.ERROR else "info"
-            if record.levelno >= logging.WARNING:
+            text = clean_log_text(self.format(record)).strip()
+            if (
+                self._EPOCH_HEADER_RE.match(text)
+                or self._VAL_ROW_RE.match(text)
+                or self._ARGS_DUMP_RE.match(text)
+            ):
+                return
+            # Ultralytics logs warnings at INFO level with a "WARNING" prefix.
+            if record.levelno >= logging.ERROR or text.startswith("ERROR"):
+                level = "error"
+            elif record.levelno >= logging.WARNING or text.startswith("WARNING"):
                 level = "warning"
-            self._sink.log(self.format(record), level)
+            else:
+                level = "info"
+            self._sink.log(text, level)
         except Exception:
             pass
 
@@ -77,7 +148,7 @@ def _resolve_weights(name: str, sink: EventSink) -> str:
 class YoloTrainer(BaseTrainer):
     key = "yolo"
     display_name = "YOLO (Ultralytics)"
-    description = "基于 Ultralytics 的检测 / 分割 / 分类训练，支持 MPS 加速"
+    description = "基于 Ultralytics 的检测 / 分割 / 分类训练，自动适配 CUDA / MPS / CPU 加速"
     tasks = (
         TaskSpec("detect", "目标检测", "bbox", "2d", "矩形框标注，输出检测框"),
         TaskSpec("segment", "实例分割", "polygon", "2d", "多边形标注，输出掩膜轮廓"),
@@ -212,8 +283,8 @@ class YoloTrainer(BaseTrainer):
                 type="choice",
                 default="auto",
                 group="性能",
-                choices=("auto", "mps", "cpu"),
-                help="Apple Silicon 选 mps；显存不足或算子不支持时回退 cpu",
+                choices=DEVICE_CHOICES,
+                help=DEVICE_HELP,
             ),
             ParamSpec(
                 key="workers",
@@ -238,7 +309,7 @@ class YoloTrainer(BaseTrainer):
                 type="bool",
                 default=False,
                 group="性能",
-                help="MPS 后端对 AMP 支持不完整，建议保持关闭",
+                help="NVIDIA GPU（CUDA）上建议开启；MPS 支持不完整，Apple 机器建议关闭",
             ),
             ParamSpec(
                 key="seed",
@@ -327,8 +398,10 @@ class YoloTrainer(BaseTrainer):
         ul_logger.addHandler(handler)
 
         epochs = int(params.get("epochs", 100))
-        device = params.get("device", "auto")
-        device = None if device == "auto" else str(device)
+        device, device_warning = validate_device(str(params.get("device", "auto")))
+        if device_warning:
+            sink.log(device_warning, "warning")
+        sink.log(f"计算设备: {device}")
 
         kwargs = {
             "data": prepared.meta.get("data_yaml") or str(prepared.dataset_dir),
@@ -352,9 +425,8 @@ class YoloTrainer(BaseTrainer):
             "exist_ok": True,
             "verbose": True,
             "plots": True,
+            "device": device,
         }
-        if device is not None:
-            kwargs["device"] = device
 
         model = YOLO(weights)
 
@@ -416,6 +488,12 @@ class YoloTrainer(BaseTrainer):
                         )
                     )
                     sink.metric(epoch, metrics, total_epochs=total, phase="epoch")
+
+                    if epoch != state.get("last_summary_epoch"):
+                        state["last_summary_epoch"] = epoch
+                        summary = _epoch_summary(epoch, total, metrics)
+                        if summary:
+                            sink.log(summary)
 
                 if len(state["best"]) == 0 and metrics:
                     state["best"] = dict(metrics)

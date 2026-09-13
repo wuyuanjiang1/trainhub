@@ -18,6 +18,10 @@
 # 用 >= 是为了留出升级空间；若要完全复现，把 >= 改成 == 即可。
 #
 # 说明：
+#   * 计算设备（device 参数）全平台自动适配：auto 优先 CUDA（NVIDIA 显卡），
+#     其次 MPS（Apple Silicon），最后 CPU；所选设备不可用时会自动回退并提示。
+#     Windows / Linux 要用 NVIDIA GPU 训练，请把 torch 换成 CUDA 版，例如：
+#     pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
 #   * 只想跑 YOLO 的话，可以删掉 nnunetv2 / nnibabel / SimpleITK / blosc2 等，
 #     安装体积和时间都会小很多。
 #   * KMP_DUPLICATE_LIB_OK、QT_API、PYTORCH_ENABLE_MPS_FALLBACK 由程序在

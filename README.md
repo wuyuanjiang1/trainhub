@@ -1,6 +1,6 @@
 # trainhub
 
-基于 PyQt6 的一站式「标注 → 训练」工作站。内置 labelme 兼容的标注引擎，以及 YOLO / nnU-Net 双训练后端，Apple Silicon 原生 MPS 加速，训练器通过插件体系可自由扩展。
+基于 PyQt6 的一站式「标注 → 训练」工作站。内置 labelme 兼容的标注引擎，以及 YOLO / nnU-Net 双训练后端，计算设备全平台自动适配（CUDA / MPS / CPU），训练器通过插件体系可自由扩展。
 
 ## 功能特性
 
@@ -35,7 +35,7 @@
 
 > 说明：
 > - `torch` 与 `torchvision` 版本必须配套，一次 `pip install torch torchvision` 会自动解析；不要分别固定不同代版本。
-> - 上表中的 **实测版本** 来自本项目开发机（macOS 25.6 / Apple Silicon M5 / Python 3.11.16）；其余平台为推荐要求，尚未在本机实测。
+> - 上表中的 **实测版本** 来自本项目开发机（macOS 25.6 / Apple Silicon M5 / Python 3.11.16）；已在 Windows 11 + RTX 4060 Laptop（CUDA 13.0 wheel，torch 2.14.0+cu130）上实测通过。
 > - CUDA 平台安装命令形如 `pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124`，`cu124` 请换成与显卡驱动匹配的 CUDA 版本。
 
 ## 环境安装
@@ -120,7 +120,7 @@ python -m trainhub /path/to/proj   # 打开（或新建）指定项目目录
 
 ## 训练后端说明
 
-- **YOLO（Ultralytics）**：支持 `detect / segment / classify`；Apple Silicon 上可选用 MPS，显存或算子不支持时回退 CPU。
+- **YOLO（Ultralytics）**：支持 `detect / segment / classify`；计算设备支持 `auto / cuda / mps / cpu`，`auto` 按平台自动选择（优先 CUDA，其次 MPS，最后 CPU），所选设备不可用时自动回退并提示。
 - **nnU-Net**：2D 医学分割。程序启动时自动设置 `nnUNet_raw / nnUNet_preprocessed / nnUNet_results` 到项目目录，不污染全局环境。
 
 ## 可扩展性
@@ -147,7 +147,8 @@ class MyTrainer(BaseTrainer):
 
 ## 已知问题
 
-- MPS 后端对 AMP（混合精度）支持不完整，建议保持关闭（默认关闭）。
+- 计算设备 `auto` 的优先级为 CUDA → MPS → CPU；在 Windows / Linux 无独显机器上会自动落到 CPU，属预期行为。
+- MPS 后端对 AMP（混合精度）支持不完整，Apple 机器上建议保持关闭（默认关闭）；NVIDIA GPU 上可开启以加速训练。
 - nnU-Net 部分算子 MPS 未实现，程序已自动开启 `PYTORCH_ENABLE_MPS_FALLBACK` 回退到 CPU。
 
 ## 致谢

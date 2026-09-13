@@ -7,10 +7,24 @@ signals (see :mod:`trainhub.ui.runner`).
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from dataclasses import field
 from typing import Any
 from typing import Callable
+
+# Third-party backends (Ultralytics especially) embed ANSI escape sequences
+# and \r-separated progress frames in their log output; the GUI log pane
+# renders plain text, so every message is cleaned before display.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?")
+
+
+def clean_log_text(message: str) -> str:
+    """Strip ANSI escapes; for \\r progress frames keep only the last frame."""
+    message = _ANSI_RE.sub("", message).replace("\x1b", "")
+    if "\r" in message:
+        message = next((f for f in reversed(message.split("\r")) if f.strip()), "")
+    return message.rstrip()
 
 
 @dataclass
@@ -80,7 +94,7 @@ class EventSink:
 
     def log(self, message: str, level: str = "info") -> None:
         if self._on_log is not None:
-            self._on_log(LogEvent(message=message, level=level))
+            self._on_log(LogEvent(message=clean_log_text(str(message)), level=level))
 
     def progress(
         self,

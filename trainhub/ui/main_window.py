@@ -21,7 +21,7 @@ class MainWindow(QtWidgets.QMainWindow):
         parent: QtWidgets.QWidget | None = None,
     ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("trainhub — 标注与训练工作站")
+        self.setWindowTitle("trainhub")
         self.resize(1560, 960)
         self.setMinimumSize(1120, 700)
         screen = QtGui.QGuiApplication.primaryScreen().availableGeometry()
@@ -140,10 +140,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage("有未保存的标注修改")
 
     def _update_title(self) -> None:
-        marker = "*" if self._annotate.is_dirty else ""
-        self.setWindowTitle(
-            f"trainhub — {self._project.name}{marker}  ({self._project.root})"
-        )
+        # 标题栏保持简洁；项目名/目录见状态栏，未保存修改会提示在状态栏。
+        self.setWindowTitle("trainhub")
 
     # ---------------------------------------------------------------- misc
     def _show_about(self) -> None:

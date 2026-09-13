@@ -441,6 +441,15 @@ def apply_theme(app: QtWidgets.QApplication) -> None:
     app.setStyleSheet(_stylesheet())
 
 
+def mono_font() -> QtGui.QFont:
+    """跨平台等宽字体（Windows: Consolas / macOS: Menlo / 兜底: Courier New）。"""
+    font = QtGui.QFont()
+    font.setFamilies(["Consolas", "Menlo", "Cascadia Mono", "Courier New"])
+    font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+    font.setPointSize(10)
+    return font
+
+
 def section_label(text: str) -> QtWidgets.QLabel:
     """A dim, small-caps-styled section header for the panel lists."""
     label = QtWidgets.QLabel(text)

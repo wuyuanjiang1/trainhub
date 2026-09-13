@@ -16,10 +16,12 @@ from ..core.registry import get_trainer
 from ..core.registry import load_builtin_trainers
 from ..core.trainer import TrainJob
 from ..core.trainer import TrainResult
+from .artifact_preview import ArtifactPreview
 from .metric_chart import MetricChart
 from .param_form import ParamForm
 from .runner import TrainRunner
 from .theme import LOG_COLORS
+from .theme import mono_font
 from .theme import section_label
 
 
@@ -74,18 +76,12 @@ class TrainTab(QtWidgets.QWidget):
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(5000)
         self._log.setProperty("log", True)
-        log_font = QtGui.QFont()
-        # Menlo is macOS-only; keep an explicit monospace stack so per-epoch
-        # summary lines align on Windows / Linux too.
-        log_font.setFamilies(
-            ["Consolas", "Menlo", "Cascadia Mono", "Courier New"]
-        )
-        log_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
-        log_font.setPointSize(10)
-        self._log.setFont(log_font)
+        self._log.setFont(mono_font())
 
         self._artifacts = QtWidgets.QListWidget()
         self._artifacts.itemDoubleClicked.connect(self._open_artifact)
+        self._artifacts.itemSelectionChanged.connect(self._preview_artifact)
+        self._artifact_preview = ArtifactPreview()
 
         self._history_combo = QtWidgets.QComboBox()
         self._history_combo.currentIndexChanged.connect(self._on_history_changed)
@@ -118,9 +114,18 @@ class TrainTab(QtWidgets.QWidget):
         left_layout.addWidget(self._history_combo)
 
         right = QtWidgets.QTabWidget()
+        artifacts_pane = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        artifacts_pane.setChildrenCollapsible(False)
+        artifacts_pane.setHandleWidth(6)
+        self._artifacts.setMinimumWidth(220)
+        artifacts_pane.addWidget(self._artifacts)
+        artifacts_pane.addWidget(self._artifact_preview)
+        artifacts_pane.setStretchFactor(0, 0)
+        artifacts_pane.setStretchFactor(1, 1)
+        artifacts_pane.setSizes([280, 640])
         right.addTab(self._chart, "训练曲线")
         right.addTab(self._log, "训练日志")
-        right.addTab(self._artifacts, "产物")
+        right.addTab(artifacts_pane, "产物")
 
         # Draggable split: the form keeps a readable minimum width, the charts
         # get the lion's share on wide screens.
@@ -241,11 +246,21 @@ class TrainTab(QtWidgets.QWidget):
         self._chart.load_events(events)
         self._log.appendPlainText(f"—— 载入历史运行 {Path(path).name} ——")
         self._artifacts.clear()
+        self._artifact_preview.clear()
         for file in sorted(Path(path).rglob("*")):
-            if file.is_file():
-                item = QtWidgets.QListWidgetItem(str(file.relative_to(path)))
-                item.setData(QtCore.Qt.ItemDataRole.UserRole, str(file))
-                self._artifacts.addItem(item)
+            if not file.is_file():
+                continue
+            rel = file.relative_to(path)
+            # 训练时自动导出的中间数据集（几百个图像/标签副本）不是训练成果，
+            # 不进产物列表；实时训练的上报本来就不含它们。
+            if rel.parts[0] == "dataset":
+                continue
+            item = QtWidgets.QListWidgetItem(str(rel))
+            item.setData(QtCore.Qt.ItemDataRole.UserRole, str(file))
+            self._artifacts.addItem(item)
+        # Auto-preview the first artifact so the pane is never a dead wall.
+        if self._artifacts.count():
+            self._artifacts.setCurrentRow(0)
 
     # -------------------------------------------------------------- running
     def start_training(self) -> None:
@@ -291,6 +306,7 @@ class TrainTab(QtWidgets.QWidget):
         self._chart.reset()
         self._log.clear()
         self._artifacts.clear()
+        self._artifact_preview.clear()
         self._set_running(True)
 
         self._runner = TrainRunner(trainer, job, self)
@@ -358,6 +374,14 @@ class TrainTab(QtWidgets.QWidget):
         item = QtWidgets.QListWidgetItem(f"[{kind}] {label or Path(path).name}")
         item.setData(QtCore.Qt.ItemDataRole.UserRole, path)
         self._artifacts.addItem(item)
+
+    def _preview_artifact(self) -> None:
+        items = self._artifacts.selectedItems()
+        if not items:
+            return
+        path = items[0].data(QtCore.Qt.ItemDataRole.UserRole)
+        if path:
+            self._artifact_preview.preview(str(path))
 
     def _on_succeeded(self, result: TrainResult) -> None:
         self._progress.setRange(0, 1)

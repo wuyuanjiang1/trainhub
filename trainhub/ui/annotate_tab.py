@@ -42,6 +42,7 @@ from ..core.project import Project
 from ..trainers.yolo.converter import import_yolo_dataset
 from .prelabel_dialog import PrelabelDialog
 from .prelabel_dialog import PrelabelWorker
+from .theme import SUCCESS
 from .theme import section_label
 
 LABEL_COLORMAP = imgviz.label_colormap()
@@ -546,6 +547,7 @@ class AnnotateTab(QtWidgets.QWidget):
                 font = item.font()
                 font.setBold(True)
                 item.setFont(font)
+                item.setForeground(QtGui.QColor(SUCCESS))
             else:
                 item.setToolTip("未标注")
             self._file_list.addItem(item)
@@ -789,6 +791,7 @@ class AnnotateTab(QtWidgets.QWidget):
             font = item.font()
             font.setBold(True)
             item.setFont(font)
+            item.setForeground(QtGui.QColor(SUCCESS))
             item.setToolTip("已标注（AI 预标注）")
 
     def _on_prelabel_file_empty(self, image_path: str) -> None:

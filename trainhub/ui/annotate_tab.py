@@ -35,6 +35,7 @@ from ..annotator.widgets.label_list_widget import format_shape_label
 from ..core.dataset import IMAGE_SUFFIXES
 from ..core.prelabel import find_project_weights
 from ..core.prelabel import predict_shapes
+from ..core.prelabel_vlm import UsageTracker
 from ..core.prelabel_vlm import VLM_PROVIDERS
 from ..core.prelabel_vlm import predict_shapes_vlm
 from ..core.project import Project
@@ -148,6 +149,8 @@ class AnnotateTab(QtWidgets.QWidget):
         self._shape_clipboard = ShapeClipboard(self)
         self._prelabel_dialog: PrelabelDialog | None = None
         self._prelabel_worker: PrelabelWorker | None = None
+        self._prelabel_tracker: UsageTracker | None = None
+        self._prelabel_stats_provider = None
         self._prelabel_new_labels: set[str] = set()
         self._prelabel_written = 0
         self._prelabel_applied = 0
@@ -682,12 +685,16 @@ class AnnotateTab(QtWidgets.QWidget):
 
     def _start_prelabel(self, params: dict) -> None:
         engine = params.get("engine", "yolo")
+        tracker = UsageTracker()
+        self._prelabel_tracker = tracker
+        self._prelabel_stats_provider = None
         if engine == "vlm":
             provider = VLM_PROVIDERS[params["provider"]]
+            self._prelabel_stats_provider = provider
             labels = list(self._project.labels)
 
             def predict_fn(image_path: Path) -> list[dict]:
-                return predict_shapes_vlm(
+                shapes = predict_shapes_vlm(
                     str(image_path),
                     provider=provider,
                     api_key=params["api_key"],
@@ -696,7 +703,11 @@ class AnnotateTab(QtWidgets.QWidget):
                     labels=labels,
                     hint=params.get("hint", ""),
                     prompt=params.get("prompt", ""),
+                    label_translator=self._project.canonicalize_label,
+                    usage_tracker=tracker,
                 )
+                tracker.note_image(found=bool(shapes))
+                return shapes
 
             note = provider.display_name
             if params["write"]:
@@ -705,7 +716,9 @@ class AnnotateTab(QtWidgets.QWidget):
             weights, conf, device = params["weights"], params["conf"], params["device"]
 
             def predict_fn(image_path: Path) -> list[dict]:
-                return predict_shapes(str(image_path), weights, conf, device=device)
+                shapes = predict_shapes(str(image_path), weights, conf, device=device)
+                tracker.note_image(found=bool(shapes))
+                return shapes
 
             note = f"计算设备 {params['device']}"
             if params.get("device_warning"):
@@ -718,6 +731,7 @@ class AnnotateTab(QtWidgets.QWidget):
             parent=self,
         )
         worker.progress.connect(self._prelabel_dialog.on_progress)
+        worker.progress.connect(self._refresh_prelabel_stats)
         worker.image_ready.connect(self._on_prelabel_image_ready)
         worker.file_done.connect(self._on_prelabel_file_done)
         worker.file_empty.connect(self._on_prelabel_file_empty)
@@ -769,6 +783,14 @@ class AnnotateTab(QtWidgets.QWidget):
     def _on_prelabel_file_empty(self, image_path: str) -> None:
         self._prelabel_empty.append(image_path)
 
+    def _refresh_prelabel_stats(self, *_args: object) -> None:
+        """每处理完一张，刷新对话框里的 token / 检出率 / 费用标识。"""
+        tracker = getattr(self, "_prelabel_tracker", None)
+        if tracker is not None:
+            self._prelabel_dialog.update_stats(
+                tracker.format(self._prelabel_stats_provider)
+            )
+
     def _on_prelabel_failed(self, message: str) -> None:
         self.statusMessage.emit(f"AI 预标注失败: {message}")
         QtWidgets.QMessageBox.critical(self, "AI 预标注失败", message)
@@ -777,6 +799,9 @@ class AnnotateTab(QtWidgets.QWidget):
         worker = self._prelabel_worker
         cancelled = bool(worker is not None and getattr(worker, "_cancelled", False))
         self._register_prelabel_labels(self._prelabel_new_labels)
+        # 译名登记表可能新增了条目（标签集未变时不会触发自动保存）
+        if self._prelabel_written or self._prelabel_applied:
+            self._project.save()
         dialog = self._prelabel_dialog
         if dialog is not None:
             dialog.on_finished()

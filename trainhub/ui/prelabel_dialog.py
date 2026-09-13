@@ -26,6 +26,7 @@ from ..core.prelabel_vlm import VLM_PROVIDERS
 from ..core.prelabel_vlm import VLMProvider
 from ..core.prelabel_vlm import provider_env_key
 from ..core.prelabel_vlm import test_connection
+from .theme import mono_font
 
 _SETTINGS_ORG = "trainhub"
 _SETTINGS_APP = "trainhub"
@@ -315,6 +316,11 @@ class PrelabelDialog(QtWidgets.QDialog):
         self._progress.hide()
         layout.addWidget(self._progress)
 
+        self._stats_label = _dim_note("")
+        self._stats_label.setFont(mono_font())
+        self._stats_label.hide()
+        layout.addWidget(self._stats_label)
+
         self._status = QtWidgets.QLabel(
             "推理在后台进行，结束后候选标注需人工检查微调再保存。"
         )
@@ -474,6 +480,7 @@ class PrelabelDialog(QtWidgets.QDialog):
         self._progress.setRange(0, total)
         self._progress.setValue(0)
         self._progress.show()
+        self._stats_label.hide()
         self._start_button.setEnabled(False)
         self._test_button.setEnabled(False)
         self._yolo_group.setEnabled(False)
@@ -488,6 +495,12 @@ class PrelabelDialog(QtWidgets.QDialog):
         self._progress.setValue(done)
         if name:
             self._status.setText(f"({done}/{total}) {name}")
+
+    def update_stats(self, text: str) -> None:
+        """刷新 token 用量 / 检出率 / 费用一行式标识。"""
+        if text:
+            self._stats_label.setText(text)
+            self._stats_label.show()
 
     def on_finished(self) -> None:
         self._cancel_button.setEnabled(False)

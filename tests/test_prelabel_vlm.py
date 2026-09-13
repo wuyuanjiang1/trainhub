@@ -259,9 +259,112 @@ def test_build_prompt_requires_english_labels():
     assert "英文" in with_labels
     assert "label_cn" in with_labels
     assert '"cat"' in with_labels  # JSON 示例里 label 是英文
+    assert "不得新增标签" in with_labels
     free = build_prompt([])
     assert "英文" in free
     assert "禁止使用中文" in free
+    assert "不得增加提示词未提到的类别" in free
+
+
+# --------------------------- 提示词裸清单 -> 类别白名单 ---------------------------
+def test_whitelist_single_item():
+    from trainhub.core.prelabel_vlm import extract_label_whitelist
+
+    assert extract_label_whitelist("木棍") == ["木棍"]
+
+
+def test_whitelist_multiple_items_various_separators():
+    from trainhub.core.prelabel_vlm import extract_label_whitelist
+
+    assert extract_label_whitelist("木棍 纸箱") == ["木棍", "纸箱"]
+    assert extract_label_whitelist("木棍、纸箱，塑料瓶") == ["木棍", "纸箱", "塑料瓶"]
+    assert extract_label_whitelist("bottle, can; box") == ["bottle", "can", "box"]
+    assert extract_label_whitelist("木棍 木棍") == ["木棍"]  # 去重保序
+
+
+def test_whitelist_rejects_instructions_and_noise():
+    from trainhub.core.prelabel_vlm import DEFAULT_DETECT_PROMPT
+    from trainhub.core.prelabel_vlm import extract_label_whitelist
+
+    assert extract_label_whitelist("") is None
+    assert extract_label_whitelist(DEFAULT_DETECT_PROMPT) is None
+    assert extract_label_whitelist("只标完整的木棍") is None  # 指令词
+    assert extract_label_whitelist("忽略文字水印") is None
+    assert extract_label_whitelist("请检测图像中的木棍") is None
+    assert extract_label_whitelist("找出所有红色目标的框并输出标签列表" * 2) is None  # 太长
+    assert extract_label_whitelist("a" * 20) is None  # 单词过长
+
+
+def test_prompt_whitelist_overrides_and_enforces(tmp_path, monkeypatch):
+    """端到端：提示词只写"木棍"时，模型多吐的类别必须在解析层被丢弃。"""
+    import json
+
+    from trainhub.core import prelabel_vlm
+    from PIL import Image
+
+    image_path = tmp_path / "img.jpg"
+    Image.new("RGB", (200, 100), (120, 120, 120)).save(image_path)
+
+    captured = {}
+
+    def fake_chat(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return (
+            json.dumps(
+                [
+                    {"label": "stick", "label_cn": "木棍", "bbox_2d": [10, 10, 300, 500]},
+                    {"label": "hand", "label_cn": "hand", "bbox_2d": [500, 500, 800, 900]},
+                ]
+            ),
+            {"prompt_tokens": 800, "completion_tokens": 60},
+        )
+
+    monkeypatch.setattr(prelabel_vlm, "_chat_completion", fake_chat)
+    tracker = prelabel_vlm.UsageTracker()
+    shapes = prelabel_vlm.predict_shapes_vlm(
+        str(image_path),
+        provider=prelabel_vlm.VLM_PROVIDERS["deepseek"],
+        api_key="sk-test",
+        labels=(),  # 项目无标签
+        prompt="木棍",
+        usage_tracker=tracker,
+    )
+    # 提示词清单成为类别约束注入 prompt
+    assert "木棍" in captured["prompt"]
+    assert "不得新增标签" in captured["prompt"]
+    # hand 不在白名单，被强制丢弃
+    assert [s["label"] for s in shapes] == ["stick"]
+    assert shapes[0]["other_data"] == {"label_cn": "木棍"}
+    # token 用量进入 tracker（图像计数由调用方负责）
+    assert tracker.prompt_tokens == 800 and tracker.completion_tokens == 60
+
+
+def test_project_labels_used_when_prompt_is_instruction(tmp_path, monkeypatch):
+    """指令式提示词不解析白名单，项目标签照常生效。"""
+    import json
+
+    from trainhub.core import prelabel_vlm
+    from PIL import Image
+
+    image_path = tmp_path / "img.jpg"
+    Image.new("RGB", (200, 100), (120, 120, 120)).save(image_path)
+
+    captured = {}
+
+    def fake_chat(**kwargs):
+        captured["prompt"] = kwargs["prompt"]
+        return "[]", {}
+
+    monkeypatch.setattr(prelabel_vlm, "_chat_completion", fake_chat)
+    prelabel_vlm.predict_shapes_vlm(
+        str(image_path),
+        provider=prelabel_vlm.VLM_PROVIDERS["deepseek"],
+        api_key="sk-test",
+        labels=["box"],
+        prompt="只标完整的箱子",
+    )
+    assert "box" in captured["prompt"]
+    assert "只标完整的箱子" in captured["prompt"]
 
 
 def test_provider_presets_complete():

@@ -1,14 +1,20 @@
-"""Grounding 能力验证：用项目里已标注的图像评测 VLM 预标注的框质量。
+"""Grounding 能力验证：评测服务商预标注的检出率与框质量。
 
-接入大模型预标注前，先跑这个脚本确认所选服务商的检测框"能不能用"：
+两种模式：
 
-    python scripts/test_vlm_grounding.py --provider deepseek --project /path/to/proj
-    python scripts/test_vlm_grounding.py --provider zhipu --api-key KEY \
-        --model glm-4.5v --limit 10 --json-out report.json
+1. 有真值（默认）：对项目里已标注的图像调用 VLM 预标注，与 labelme 真值
+   做同类贪心匹配，输出 IoU 与漏检/误检统计：
 
-对带标注的图像逐张调用 VLM 预标注，与 labelme 真值做同类贪心匹配，输出
-IoU 与漏检/误检统计。粗略判断标准：IoU>=0.5 的框占多数即可用于预标注
-（候选框反正要人工微调）。
+       python scripts/test_vlm_grounding.py --provider deepseek --project /path/to/proj
+
+2. 无真值（--no-gt）：不需要任何标注，只统计检出率与框面积分布，适合在
+   接入前横向对比服务商的稳定性：
+
+       python scripts/test_vlm_grounding.py --provider deepseek \
+           --images /path/to/images --limit 20 --no-gt
+
+判断标准：框质量模式看 IoU>=0.5 占比；无真值模式看检出率是否稳定、
+框面积是否与目标尺度相符（全图大小的大框通常是坏框）。
 
 API Key 优先级：--api-key > 环境变量（DEEPSEEK_API_KEY / ZHIPU_API_KEY /
 DASHSCOPE_API_KEY / SILICONFLOW_API_KEY）。注意：脚本会把所选图像上传到
@@ -19,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import statistics
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -48,87 +55,108 @@ def _iou(a: tuple[float, float, float, float], b: tuple[float, float, float, flo
     return inter / (area_a + area_b - inter)
 
 
-def _gt_boxes(item) -> list[tuple[str, tuple[float, float, float, float]]]:
-    boxes = []
-    for shape in item.shapes:
-        box = bbox_of(shape)
-        if box is not None:
-            boxes.append((shape.label, box))
-    return boxes
-
-
-def main() -> int:
-    parser = argparse.ArgumentParser(description="VLM 预标注 grounding 质量验证")
-    parser.add_argument(
-        "--provider", required=True, choices=sorted(VLM_PROVIDERS), help="服务商预设"
-    )
-    parser.add_argument("--api-key", default="", help="不填则读环境变量")
-    parser.add_argument("--model", default="", help="默认用该服务商的预设模型")
-    parser.add_argument("--base-url", default="", help="覆盖服务商预设接口地址")
-    parser.add_argument("--prompt", default="", help="自定义检测任务提示词")
-    group = parser.add_mutually_exclusive_group(required=True)
-    group.add_argument("--project", help="trainhub 项目目录")
-    group.add_argument("--images", help="图像目录（配合 --annotations）")
-    parser.add_argument("--annotations", default="", help="labelme JSON 目录")
-    parser.add_argument("--labels", default="", help="逗号分隔的类别白名单；默认读项目标签")
-    parser.add_argument("--limit", type=int, default=5, help="最多评测的图像数")
-    parser.add_argument("--max-side", type=int, default=1600, help="发送前压到的最长边")
-    parser.add_argument("--json-out", default="", help="把明细写入 JSON 文件")
-    args = parser.parse_args()
-
-    provider = VLM_PROVIDERS[args.provider]
+def _resolve_api_key(args, provider) -> str:
     api_key = args.api_key.strip()
-    if not api_key:
-        import os
+    if api_key:
+        return api_key
+    import os
 
-        for name in ENV_KEYS.get(provider.key, ()):
-            api_key = os.environ.get(name, "").strip()
-            if api_key:
-                print(f"使用环境变量 {name} 中的 API Key")
-                break
-    if not api_key:
-        print("错误：未提供 API Key（--api-key 或对应环境变量）", file=sys.stderr)
+    for name in ENV_KEYS.get(provider.key, ()):
+        value = os.environ.get(name, "").strip()
+        if value:
+            print(f"使用环境变量 {name} 中的 API Key")
+            return value
+    print("错误：未提供 API Key（--api-key 或对应环境变量）", file=sys.stderr)
+    return ""
+
+
+def _predict(provider, api_key, args, image_path: Path, labels: list[str]) -> list[dict]:
+    return predict_shapes_vlm(
+        str(image_path),
+        provider=provider,
+        api_key=api_key,
+        model=args.model,
+        base_url=args.base_url,
+        labels=labels,
+        prompt=args.prompt,
+        max_side=args.max_side,
+    )
+
+
+def run_detection_rate(provider, api_key, args, image_paths: list[Path], labels: list[str]) -> int:
+    """无真值模式：检出率 + 框面积分布。"""
+    print(f"无真值模式：评测 {len(image_paths)} 张图像的检出率；类别 {labels or '（自由命名）'}\n")
+    hits = 0
+    box_counts: list[int] = []
+    area_fractions: list[float] = []
+    missed: list[str] = []
+    errors = 0
+
+    for image_path in image_paths:
+        try:
+            shapes = _predict(provider, api_key, args, image_path, labels)
+        except VLMError as exc:
+            print(f"[失败] {image_path.name}: {exc}")
+            errors += 1
+            continue
+        count = len(shapes)
+        box_counts.append(count)
+        if count:
+            hits += 1
+            from PIL import Image
+
+            with Image.open(image_path) as im:
+                image_area = im.width * im.height
+            for shape in shapes:
+                (x1, y1), (x2, y2) = shape["points"]
+                area_fractions.append(max(0.0, (x2 - x1) * (y2 - y1)) / image_area)
+        else:
+            missed.append(image_path.name)
+        print(f"[{'检出' if count else '空  '}] {image_path.name}: {count} 个框")
+
+    total = len(image_paths) - errors
+    if total == 0:
+        print("\n没有成功调用过模型（网络/鉴权失败）。")
         return 2
 
-    labels = [s for s in (x.strip() for x in args.labels.split(",")) if s]
-    if args.project:
-        project = Project.open_or_create(args.project)
-        images_dir, annotations_dir = project.images_dir, project.annotations_dir
-        if not labels:
-            labels = list(project.labels)
+    rate = hits / total
+    print("\n========== 汇总 ==========")
+    print(f"成功 {total} 张（失败 {errors}），检出 {hits} 张，检出率 {rate:.0%}")
+    if box_counts:
+        print(f"命中图的框数：平均 {statistics.mean(box_counts):.2f}，最多 {max(box_counts)}")
+    if area_fractions:
+        print(
+            "框面积占全图比例："
+            f"中位数 {statistics.median(area_fractions):.1%}，"
+            f"最大 {max(area_fractions):.1%}"
+        )
+        big = sum(1 for f in area_fractions if f > 0.5)
+        if big:
+            print(f"⚠ 有 {big} 个框超过全图一半面积——通常是坏框（模型在糊答案）")
+    if missed:
+        shown = "、".join(missed[:10])
+        more = f" 等 {len(missed)} 张" if len(missed) > 10 else ""
+        print(f"未检出：{shown}{more}")
+
+    if rate >= 0.8:
+        print("\n结论：检出率良好。")
+    elif rate >= 0.4:
+        print("\n结论：检出率偏低，模型 grounding 不稳定，建议换服务商对比。")
     else:
-        if not args.annotations:
-            print("错误：--images 需要同时提供 --annotations", file=sys.stderr)
-            return 2
-        images_dir = Path(args.images)
-        annotations_dir = Path(args.annotations)
+        print("\n结论：检出率很差，不建议用该服务商做预标注。")
+    return 0
 
-    items = [
-        item for item in scan_dataset(images_dir, annotations_dir, require_annotation=True)
-        if item.shapes
-    ]
-    if not items:
-        print("错误：没有找到带标注的图像", file=sys.stderr)
-        return 2
-    items = items[: max(1, args.limit)]
+
+def run_with_ground_truth(provider, api_key, args, items, labels: list[str]) -> int:
+    """有真值模式：IoU 贪心匹配。"""
     print(f"评测 {len(items)} 张图像；服务商 {provider.display_name}；类别 {labels or '（自由命名）'}\n")
-
     per_image = []
     ious_by_label: dict[str, list[float]] = defaultdict(list)
     total_gt = total_pred = total_good = 0
 
     for item in items:
         try:
-            shapes = predict_shapes_vlm(
-                str(item.image_path),
-                provider=provider,
-                api_key=api_key,
-                model=args.model,
-                base_url=args.base_url,
-                labels=labels,
-                prompt=args.prompt,
-                max_side=args.max_side,
-            )
+            shapes = _predict(provider, api_key, args, item.image_path, labels)
         except VLMError as exc:
             print(f"[失败] {item.image_path.name}: {exc}")
             per_image.append({"image": item.image_path.name, "error": str(exc)})
@@ -136,7 +164,11 @@ def main() -> int:
 
         preds = [(s["label"], (s["points"][0][0], s["points"][0][1],
                                s["points"][1][0], s["points"][1][1])) for s in shapes]
-        gts = _gt_boxes(item)
+        gts = [
+            (shape.label, bbox_of(shape))
+            for shape in item.shapes
+            if bbox_of(shape) is not None
+        ]
         used: set[int] = set()
         matched: list[float] = []
         for gt_label, gt_box in gts:
@@ -218,6 +250,78 @@ def main() -> int:
         )
         print(f"\n明细已写入 {args.json_out}")
     return 0
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="VLM 预标注 grounding 质量验证")
+    parser.add_argument(
+        "--provider", required=True, choices=sorted(VLM_PROVIDERS), help="服务商预设"
+    )
+    parser.add_argument("--api-key", default="", help="不填则读环境变量")
+    parser.add_argument("--model", default="", help="默认用该服务商的预设模型")
+    parser.add_argument("--base-url", default="", help="覆盖服务商预设接口地址")
+    parser.add_argument("--prompt", default="", help="自定义检测任务提示词")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--project", help="trainhub 项目目录")
+    group.add_argument("--images", help="图像目录")
+    parser.add_argument("--annotations", default="", help="labelme JSON 目录（无真值模式可省略）")
+    parser.add_argument("--no-gt", action="store_true", help="无真值模式：只统计检出率")
+    parser.add_argument("--labels", default="", help="逗号分隔的类别白名单；默认读项目标签")
+    parser.add_argument("--limit", type=int, default=5, help="最多评测的图像数")
+    parser.add_argument("--max-side", type=int, default=1600, help="发送前压到的最长边")
+    parser.add_argument("--json-out", default="", help="把明细写入 JSON 文件（仅真值模式）")
+    args = parser.parse_args()
+
+    provider = VLM_PROVIDERS[args.provider]
+    api_key = _resolve_api_key(args, provider)
+    if not api_key:
+        return 2
+
+    labels = [s for s in (x.strip() for x in args.labels.split(",")) if s]
+    items = []
+    image_paths: list[Path] = []
+    if args.project:
+        project = Project.open_or_create(args.project)
+        if not labels:
+            labels = list(project.labels)
+        if args.no_gt or not (project.annotations_dir).exists():
+            image_paths = [
+                item.image_path
+                for item in scan_dataset(project.images_dir, project.annotations_dir)
+            ]
+        else:
+            items = [
+                item
+                for item in scan_dataset(
+                    project.images_dir, project.annotations_dir, require_annotation=True
+                )
+                if item.shapes
+            ]
+            if not items:
+                print("提示：项目里没有已标注图像，改用无真值模式（只统计检出率）\n")
+                image_paths = [
+                    item.image_path
+                    for item in scan_dataset(project.images_dir, project.annotations_dir)
+                ]
+    else:
+        from trainhub.core.dataset import find_images
+
+        image_paths = find_images(Path(args.images))
+
+    if args.no_gt or (not items and image_paths):
+        if not image_paths:
+            print("错误：没有找到图像", file=sys.stderr)
+            return 2
+        return run_detection_rate(
+            provider, api_key, args, image_paths[: max(1, args.limit)], labels
+        )
+
+    if not items:
+        print("错误：没有找到带标注的图像（无真值模式请加 --no-gt）", file=sys.stderr)
+        return 2
+    return run_with_ground_truth(
+        provider, api_key, args, items[: max(1, args.limit)], labels
+    )
 
 
 def _dump(path: str, payload: dict) -> None:

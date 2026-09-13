@@ -155,6 +155,7 @@ def build_prompt(labels: Sequence[str], hint: str = "", prompt: str = "") -> str
         "只输出一个 JSON 数组，不要输出任何解释文字、Markdown 代码块或其他内容。格式：",
         '[{"label": "cat", "label_cn": "猫", "bbox_2d": [x1, y1, x2, y2], "confidence": 0.85}]',
         "label 必须是英文；label_cn 仅在提供了类别列表时填写列表中的原名称，否则省略。",
+        "如果图中没有目标，输出空数组 []。",
     ]
     if hint.strip():
         lines += ["", f"补充要求：{hint.strip()}"]
@@ -376,6 +377,9 @@ def _extract_entries(text: str, warnings: list[str]) -> list[Any]:
     """从回复文本里抠出检测结果条目（JSON 数组 / 包一层 / Qwen 标签）。"""
     cleaned = re.sub(r"```[a-zA-Z]*", "", text).strip()
     candidate = _extract_json_array(cleaned)
+    if isinstance(candidate, list) and not candidate:
+        # 模型明确回复空数组：图中无目标，属正常空结果
+        return []
     if candidate is not None:
         entries = _unwrap_entries(candidate)
         if entries:

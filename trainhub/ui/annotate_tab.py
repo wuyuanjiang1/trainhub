@@ -720,6 +720,7 @@ class AnnotateTab(QtWidgets.QWidget):
         worker.progress.connect(self._prelabel_dialog.on_progress)
         worker.image_ready.connect(self._on_prelabel_image_ready)
         worker.file_done.connect(self._on_prelabel_file_done)
+        worker.file_empty.connect(self._on_prelabel_file_empty)
         worker.failed.connect(self._on_prelabel_failed)
         worker.finished.connect(self._on_prelabel_finished)
         self._prelabel_worker = worker
@@ -727,6 +728,7 @@ class AnnotateTab(QtWidgets.QWidget):
         self._prelabel_new_labels = set()
         self._prelabel_written = 0
         self._prelabel_applied = 0
+        self._prelabel_empty: list[str] = []
         self._prelabel_dialog.begin_run(len(params["jobs"]), note)
         if params["write"]:
             self.statusMessage.emit("AI 预标注：批量推理中 …")
@@ -764,6 +766,9 @@ class AnnotateTab(QtWidgets.QWidget):
             item.setFont(font)
             item.setToolTip("已标注（AI 预标注）")
 
+    def _on_prelabel_file_empty(self, image_path: str) -> None:
+        self._prelabel_empty.append(image_path)
+
     def _on_prelabel_failed(self, message: str) -> None:
         self.statusMessage.emit(f"AI 预标注失败: {message}")
         QtWidgets.QMessageBox.critical(self, "AI 预标注失败", message)
@@ -778,19 +783,39 @@ class AnnotateTab(QtWidgets.QWidget):
             if cancelled:
                 dialog.mark_done("已停止。已处理的图像保持有效。")
             elif worker is not None and getattr(worker, "_write", False):
-                dialog.mark_done(
-                    f"完成，共为 {self._prelabel_written} 张图像写入候选标注。\n"
-                    "候选可能有漏检/误检，请逐张检查微调后保存。"
-                )
+                summary = self._batch_summary_message()
+                dialog.mark_done(summary)
             else:
                 dialog.mark_done(
                     f"完成，已在当前图像添加 {self._prelabel_applied} 个候选标注。\n"
                     "请检查微调后保存；不满意可点撤销。"
                 )
         self.statusMessage.emit(
-            "AI 预标注已停止" if cancelled else f"AI 预标注完成：{self._prelabel_written} 张"
+            "AI 预标注已停止" if cancelled else self._batch_summary_message(short=True)
         )
         self._prelabel_worker = None
+
+    def _batch_summary_message(self, short: bool = False) -> str:
+        empty_count = len(self._prelabel_empty)
+        head = f"AI 预标注完成：写入 {self._prelabel_written} 张"
+        if short:
+            return head + (f"，{empty_count} 张未检出候选" if empty_count else "")
+        message = f"完成，共为 {self._prelabel_written} 张图像写入候选标注。"
+        if not self._prelabel_empty:
+            return message + "\n候选可能有漏检/误检，请逐张检查微调后保存。"
+        sample = "、".join(
+            Path(p).name for p in self._prelabel_empty[:4]
+        )
+        more = f" 等 {empty_count} 张" if empty_count > 4 else ""
+        message += f"\n⚠ {empty_count} 张未检出任何候选（{sample}{more}）。"
+        if self._prelabel_written == 0:
+            message += (
+                "\n所有图像都返回空结果：请检查检测提示词与类别列表是否匹配，"
+                "或换一个服务商（如智谱 GLM / 百炼 Qwen-VL）再试。"
+            )
+        else:
+            message += "可能是目标太小或模型漏检，可换服务商或调整提示词后重跑未标注图像。"
+        return message
 
     def _register_prelabel_labels(self, labels: set[str]) -> None:
         if labels and self._project.add_labels(sorted(labels)):

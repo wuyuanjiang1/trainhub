@@ -4,6 +4,8 @@
 直接写标注 JSON（与手动保存同格式），逐张回报进度。大模型引擎走 OpenAI
 兼容接口，服务商预设见 :mod:`trainhub.core.prelabel_vlm`；API Key 存在本机
 QSettings，绝不写入项目目录（trainhub.yaml 会被整目录拷贝分享）。
+批量模式下"未检出候选"的图像会逐张经 file_empty 上报，结束时汇总展示，
+避免大面积空结果被静默吞掉。
 """
 
 from __future__ import annotations
@@ -35,6 +37,8 @@ _DEVICE_LABELS = {
     "cpu": "CPU",
 }
 
+_NOTE_COLOR = "#9a938a"
+
 
 def _saved_api_key(provider_key: str) -> str:
     settings = QtCore.QSettings(_SETTINGS_ORG, _SETTINGS_APP)
@@ -44,6 +48,13 @@ def _saved_api_key(provider_key: str) -> str:
 def _store_api_key(provider_key: str, api_key: str) -> None:
     settings = QtCore.QSettings(_SETTINGS_ORG, _SETTINGS_APP)
     settings.setValue(f"vlm/api_key/{provider_key}", api_key)
+
+
+def _dim_note(text: str) -> QtWidgets.QLabel:
+    label = QtWidgets.QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(f"color: {_NOTE_COLOR};")
+    return label
 
 
 class ConnectionTestWorker(QtCore.QThread):
@@ -84,6 +95,7 @@ class PrelabelWorker(QtCore.QThread):
     progress = QtCore.pyqtSignal(int, int, str)  # 已处理 / 总数 / 当前文件名
     image_ready = QtCore.pyqtSignal(str, list)  # 单图模式：图像路径 + shape 字典
     file_done = QtCore.pyqtSignal(str, int, list)  # 批量模式：路径 / 形状数 / 标签
+    file_empty = QtCore.pyqtSignal(str)  # 批量模式：该图未检出任何候选
     failed = QtCore.pyqtSignal(str)
 
     def __init__(
@@ -118,6 +130,8 @@ class PrelabelWorker(QtCore.QThread):
                             len(shapes),
                             sorted({s["label"] for s in shapes if s.get("label")}),
                         )
+                    else:
+                        self.file_empty.emit(str(image_path))
                 else:
                     self.image_ready.emit(str(image_path), shapes)
                 self.progress.emit(index + 1, total, Path(image_path).name)
@@ -155,7 +169,8 @@ class PrelabelDialog(QtWidgets.QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("AI 预标注")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(460)
+        self.setMaximumWidth(640)
         self._job_provider = job_provider
         self.worker: PrelabelWorker | None = None
         self._test_worker: ConnectionTestWorker | None = None
@@ -163,12 +178,20 @@ class PrelabelDialog(QtWidgets.QDialog):
         self._unlabeled_count = unlabeled_count
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setSpacing(10)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(8)
 
         # ------------------------------------------------------------ 引擎
+        # RadioButton 默认按父控件自动互斥：引擎和范围两组必须显式分组，
+        # 否则选"全部未标注图像"会把引擎悄悄切回 YOLO。
+        self._engine_buttons = QtWidgets.QButtonGroup(self)
+        self._scope_buttons = QtWidgets.QButtonGroup(self)
         engine_row = QtWidgets.QHBoxLayout()
+        engine_row.setSpacing(14)
         self._yolo_engine_radio = QtWidgets.QRadioButton("本地 YOLO 权重（离线）")
         self._vlm_engine_radio = QtWidgets.QRadioButton("大模型 API（在线）")
+        self._engine_buttons.addButton(self._yolo_engine_radio)
+        self._engine_buttons.addButton(self._vlm_engine_radio)
         if weight_options:
             self._yolo_engine_radio.setChecked(True)
         else:
@@ -182,8 +205,8 @@ class PrelabelDialog(QtWidgets.QDialog):
         # ------------------------------------------------------ YOLO 分组
         self._yolo_group = QtWidgets.QGroupBox("YOLO 引擎")
         yolo_form = QtWidgets.QFormLayout(self._yolo_group)
-        yolo_form.setHorizontalSpacing(12)
-        yolo_form.setVerticalSpacing(9)
+        yolo_form.setHorizontalSpacing(10)
+        yolo_form.setVerticalSpacing(7)
 
         self._weights_combo = QtWidgets.QComboBox()
         for label_text, data in weight_options:
@@ -211,8 +234,8 @@ class PrelabelDialog(QtWidgets.QDialog):
         # ------------------------------------------------------ VLM 分组
         self._vlm_group = QtWidgets.QGroupBox("大模型引擎（OpenAI 兼容接口）")
         vlm_form = QtWidgets.QFormLayout(self._vlm_group)
-        vlm_form.setHorizontalSpacing(12)
-        vlm_form.setVerticalSpacing(9)
+        vlm_form.setHorizontalSpacing(10)
+        vlm_form.setVerticalSpacing(7)
 
         self._provider_combo = QtWidgets.QComboBox()
         for provider in VLM_PROVIDERS.values():
@@ -220,51 +243,50 @@ class PrelabelDialog(QtWidgets.QDialog):
         self._provider_combo.currentIndexChanged.connect(self._on_provider_changed)
         vlm_form.addRow("服务商", self._provider_combo)
 
-        self._baseurl_edit = QtWidgets.QLineEdit()
-        self._baseurl_edit.setToolTip("OpenAI 兼容接口地址，预设会自动填好，可按需修改")
-        vlm_form.addRow("接口地址", self._baseurl_edit)
-
         self._model_combo = QtWidgets.QComboBox()
         self._model_combo.setEditable(True)
         self._model_combo.setToolTip("要调用的视觉模型名称")
         vlm_form.addRow("模型", self._model_combo)
 
+        self._baseurl_edit = QtWidgets.QLineEdit()
+        self._baseurl_edit.setToolTip("OpenAI 兼容接口地址，预设会自动填好，可按需修改")
+        vlm_form.addRow("接口地址", self._baseurl_edit)
+
         self._key_edit = QtWidgets.QLineEdit()
         self._key_edit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self._key_edit.setPlaceholderText("粘贴 API Key（保存在本机，不写入项目）")
-        vlm_form.addRow("API Key", self._key_edit)
+        self._test_button = QtWidgets.QPushButton("测试连接")
+        self._test_button.setToolTip("发一张内置小图，验证 Key、接口与视觉能力")
+        self._test_button.clicked.connect(self._test_connection)
+        key_row = QtWidgets.QHBoxLayout()
+        key_row.setSpacing(6)
+        key_row.addWidget(self._key_edit, 1)
+        key_row.addWidget(self._test_button)
+        vlm_form.addRow("API Key", key_row)
 
         self._prompt_edit = QtWidgets.QPlainTextEdit(DEFAULT_DETECT_PROMPT)
-        self._prompt_edit.setFixedHeight(64)
+        self._prompt_edit.setFixedHeight(58)
         self._prompt_edit.setToolTip(
             "检测任务描述（标什么、怎么标）。留空则使用默认提示词；"
             "坐标与 JSON 输出格式由程序自动附加，无需手写。"
         )
-        prompt_row = QtWidgets.QHBoxLayout()
-        prompt_row.setSpacing(6)
-        prompt_row.addWidget(self._prompt_edit, 1)
         restore_button = QtWidgets.QPushButton("默认")
         restore_button.setToolTip("恢复默认检测提示词")
         restore_button.clicked.connect(
             lambda: self._prompt_edit.setPlainText(DEFAULT_DETECT_PROMPT)
         )
-        prompt_row.addWidget(restore_button)
+        prompt_row = QtWidgets.QHBoxLayout()
+        prompt_row.setSpacing(6)
+        prompt_row.addWidget(self._prompt_edit, 1)
+        prompt_row.addWidget(restore_button, 0, QtCore.Qt.AlignmentFlag.AlignTop)
         vlm_form.addRow("检测提示词", prompt_row)
 
         self._hint_edit = QtWidgets.QLineEdit()
-        self._hint_edit.setPlaceholderText("可选，如：只标完整可见的目标；忽略文字水印")
+        self._hint_edit.setPlaceholderText("可选，如：只标完整可见的目标")
         vlm_form.addRow("补充要求", self._hint_edit)
 
-        self._vlm_note = QtWidgets.QLabel()
-        self._vlm_note.setWordWrap(True)
+        self._vlm_note = _dim_note("")
         vlm_form.addRow(self._vlm_note)
-
-        test_row = QtWidgets.QHBoxLayout()
-        self._test_button = QtWidgets.QPushButton("测试连接")
-        self._test_button.clicked.connect(self._test_connection)
-        test_row.addWidget(self._test_button)
-        test_row.addStretch(1)
-        vlm_form.addRow(test_row)
         self._vlm_group.setVisible(self._vlm_engine_radio.isChecked())
         layout.addWidget(self._vlm_group)
 
@@ -278,6 +300,8 @@ class PrelabelDialog(QtWidgets.QDialog):
             f"全部未标注图像（{unlabeled_count} 张）"
         )
         self._batch_radio.setEnabled(unlabeled_count > 0)
+        self._scope_buttons.addButton(self._current_radio)
+        self._scope_buttons.addButton(self._batch_radio)
         if current_image is None:
             self._batch_radio.setChecked(unlabeled_count > 0)
         layout.addWidget(self._current_radio)
@@ -296,6 +320,7 @@ class PrelabelDialog(QtWidgets.QDialog):
         layout.addWidget(self._status)
 
         buttons = QtWidgets.QHBoxLayout()
+        buttons.setSpacing(8)
         self._start_button = QtWidgets.QPushButton("开始预标注")
         self._start_button.setProperty("accent", True)
         self._start_button.clicked.connect(self._on_start)
@@ -348,13 +373,13 @@ class PrelabelDialog(QtWidgets.QDialog):
             placeholder = f"已从环境变量 {env_names[0]} 读取，也可粘贴其他 Key"
         self._key_edit.setPlaceholderText(placeholder)
         self._key_edit.setToolTip("API Key 保存在本机 QSettings 中，不会写入项目目录")
-        notes = []
         if provider.grounding_verified:
-            notes.append("✓ 该服务商官方支持检测框（grounding）输出。")
+            head = "✓ 该服务商官方支持检测框（grounding）输出。"
         else:
-            notes.append("⚠ 该服务商未官方声明检测框输出能力，建议先对当前图像试标一张。")
-        notes.append("批量模式会把图像内容上传到所选服务商。")
-        self._vlm_note.setText(" ".join(notes))
+            head = "⚠ 该服务商未官方声明检测框输出能力，建议先对当前图像试标一张。"
+        self._vlm_note.setText(
+            head + " 批量模式会把图像内容上传到所选服务商；图中没有目标时返回空属正常。"
+        )
 
     # ------------------------------------------------------------- actions
     def _test_connection(self) -> None:

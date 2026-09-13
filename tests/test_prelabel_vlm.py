@@ -196,6 +196,17 @@ def test_unparseable_reply_reported():
     assert any("没有找到可解析" in w for w in warnings)
 
 
+def test_empty_array_is_clean_empty_result():
+    shapes, warnings = parse_detections("[]", width=100, height=100)
+    assert shapes == []
+    assert warnings == []
+
+
+def test_build_prompt_teaches_empty_array():
+    prompt = build_prompt(["box"])
+    assert "空数组" in prompt
+
+
 def test_extract_json_array_skips_brackets_in_strings():
     text = '前文 [备注] 里的干扰 {"a": "]"}，结果: [{"label":"a","bbox_2d":[1,2,3,4]}] 尾巴'
     parsed = _extract_json_array(text)

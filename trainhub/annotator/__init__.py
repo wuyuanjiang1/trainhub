@@ -1,5 +1,11 @@
 """Self-contained PyQt6 port of the labelme 6.3.0 annotation engine.
 
+Ported from labelme 6.3.0, which is Copyright (C) 2005-2024 labelme
+contributors (wkentaro and friends) and licensed under GPL-3.0-only.
+Being a derivative work, this package -- and therefore trainhub as a
+whole -- is distributed under GPL-3.0-only; see the LICENSE file at the
+repository root.
+
 This package never imports ``labelme``, ``osam`` or ``onnxruntime``. The
 labelme JSON annotation format is kept byte-compatible so files can be
 exchanged with labelme and fed directly to YOLO / nnUNet pipelines.

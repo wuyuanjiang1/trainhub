@@ -1,4 +1,4 @@
-"""prelabel_vlm 的解析与坐标转换测试（不联网）。"""
+"""VLM 响应解析、提示词与坐标换算测试（不联网）。"""
 
 from __future__ import annotations
 
@@ -6,12 +6,13 @@ import json
 
 import pytest
 
-from trainhub.core.prelabel_vlm import VLMError
-from trainhub.core.prelabel_vlm import build_prompt
-from trainhub.core.prelabel_vlm import parse_detections
-from trainhub.core.prelabel_vlm import provider_from_key
-from trainhub.core.prelabel_vlm import VLM_PROVIDERS
-from trainhub.core.prelabel_vlm import _extract_json_array
+from trainhub.core.vlm import UsageTracker
+from trainhub.core.vlm import VLMError
+from trainhub.core.vlm import build_prompt
+from trainhub.core.vlm import parse_detections
+from trainhub.core.vlm import provider_from_key
+from trainhub.core.vlm import VLM_PROVIDERS
+from trainhub.core.vlm.parse import _extract_json_array
 
 
 def _labels(result):
@@ -248,7 +249,7 @@ def test_build_prompt_custom_override_keeps_format_block():
 
 
 def test_build_prompt_empty_falls_back_to_default():
-    from trainhub.core.prelabel_vlm import DEFAULT_DETECT_PROMPT
+    from trainhub.core.vlm import DEFAULT_DETECT_PROMPT
 
     assert build_prompt([]).startswith(DEFAULT_DETECT_PROMPT)
     assert build_prompt([], prompt="   ").startswith(DEFAULT_DETECT_PROMPT)
@@ -268,13 +269,13 @@ def test_build_prompt_requires_english_labels():
 
 # --------------------------- 提示词裸清单 -> 类别白名单 ---------------------------
 def test_whitelist_single_item():
-    from trainhub.core.prelabel_vlm import extract_label_whitelist
+    from trainhub.core.vlm import extract_label_whitelist
 
     assert extract_label_whitelist("木棍") == ["木棍"]
 
 
 def test_whitelist_multiple_items_various_separators():
-    from trainhub.core.prelabel_vlm import extract_label_whitelist
+    from trainhub.core.vlm import extract_label_whitelist
 
     assert extract_label_whitelist("木棍 纸箱") == ["木棍", "纸箱"]
     assert extract_label_whitelist("木棍、纸箱，塑料瓶") == ["木棍", "纸箱", "塑料瓶"]
@@ -283,8 +284,8 @@ def test_whitelist_multiple_items_various_separators():
 
 
 def test_whitelist_rejects_instructions_and_noise():
-    from trainhub.core.prelabel_vlm import DEFAULT_DETECT_PROMPT
-    from trainhub.core.prelabel_vlm import extract_label_whitelist
+    from trainhub.core.vlm import DEFAULT_DETECT_PROMPT
+    from trainhub.core.vlm import extract_label_whitelist
 
     assert extract_label_whitelist("") is None
     assert extract_label_whitelist(DEFAULT_DETECT_PROMPT) is None
@@ -299,7 +300,7 @@ def test_prompt_whitelist_overrides_and_enforces(tmp_path, monkeypatch):
     """端到端：提示词只写"木棍"时，模型多吐的类别必须在解析层被丢弃。"""
     import json
 
-    from trainhub.core import prelabel_vlm
+    from trainhub.core.vlm import client as vlm_client
     from PIL import Image
 
     image_path = tmp_path / "img.jpg"
@@ -319,11 +320,11 @@ def test_prompt_whitelist_overrides_and_enforces(tmp_path, monkeypatch):
             {"prompt_tokens": 800, "completion_tokens": 60},
         )
 
-    monkeypatch.setattr(prelabel_vlm, "_chat_completion", fake_chat)
-    tracker = prelabel_vlm.UsageTracker()
-    shapes = prelabel_vlm.predict_shapes_vlm(
+    monkeypatch.setattr(vlm_client, "_chat_completion", fake_chat)
+    tracker = UsageTracker()
+    shapes = vlm_client.predict_shapes_vlm(
         str(image_path),
-        provider=prelabel_vlm.VLM_PROVIDERS["deepseek"],
+        provider=VLM_PROVIDERS["deepseek"],
         api_key="sk-test",
         labels=(),  # 项目无标签
         prompt="木棍",
@@ -343,7 +344,7 @@ def test_project_labels_used_when_prompt_is_instruction(tmp_path, monkeypatch):
     """指令式提示词不解析白名单，项目标签照常生效。"""
     import json
 
-    from trainhub.core import prelabel_vlm
+    from trainhub.core.vlm import client as vlm_client
     from PIL import Image
 
     image_path = tmp_path / "img.jpg"
@@ -355,10 +356,10 @@ def test_project_labels_used_when_prompt_is_instruction(tmp_path, monkeypatch):
         captured["prompt"] = kwargs["prompt"]
         return "[]", {}
 
-    monkeypatch.setattr(prelabel_vlm, "_chat_completion", fake_chat)
-    prelabel_vlm.predict_shapes_vlm(
+    monkeypatch.setattr(vlm_client, "_chat_completion", fake_chat)
+    vlm_client.predict_shapes_vlm(
         str(image_path),
-        provider=prelabel_vlm.VLM_PROVIDERS["deepseek"],
+        provider=VLM_PROVIDERS["deepseek"],
         api_key="sk-test",
         labels=["box"],
         prompt="只标完整的箱子",

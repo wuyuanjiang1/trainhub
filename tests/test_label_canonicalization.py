@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 
-from trainhub.core.prelabel_vlm import normalize_english_label
-from trainhub.core.prelabel_vlm import parse_detections
+from trainhub.core.vlm import normalize_english_label
+from trainhub.core.vlm import parse_detections
 from trainhub.core.project import Project
 
 
@@ -72,7 +72,7 @@ def test_parse_translator_converges_variants():
     mapping: dict[str, str] = {}
 
     def translator(reference, label):
-        from trainhub.core.prelabel_vlm import normalize_english_label
+        from trainhub.core.vlm import normalize_english_label
 
         normalized = normalize_english_label(label)
         if reference:

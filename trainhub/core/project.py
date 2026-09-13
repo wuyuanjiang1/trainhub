@@ -144,7 +144,7 @@ class Project:
         英文译名；首次遇到则把归一化结果登记进去，之后所有变体都映射回
         同一个标签。无对照时只做归一化。
         """
-        from .prelabel_vlm import normalize_english_label
+        from .vlm import normalize_english_label
 
         normalized = normalize_english_label(label)
         if not reference or reference == normalized:

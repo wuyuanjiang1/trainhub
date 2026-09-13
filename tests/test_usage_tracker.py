@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from trainhub.core.prelabel_vlm import UsageTracker
-from trainhub.core.prelabel_vlm import VLM_PROVIDERS
+from trainhub.core.vlm import UsageTracker
+from trainhub.core.vlm import VLM_PROVIDERS
 
 
 def test_add_usage_deepseek_style_cache_fields():

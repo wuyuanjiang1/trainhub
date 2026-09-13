@@ -34,10 +34,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from trainhub.core.dataset import scan_dataset
 from trainhub.core.geometry import bbox_of
-from trainhub.core.prelabel_vlm import ENV_KEYS
-from trainhub.core.prelabel_vlm import VLM_PROVIDERS
-from trainhub.core.prelabel_vlm import VLMError
-from trainhub.core.prelabel_vlm import predict_shapes_vlm
+from trainhub.core.vlm import ENV_KEYS
+from trainhub.core.vlm import VLM_PROVIDERS
+from trainhub.core.vlm import VLMError
+from trainhub.core.vlm import predict_shapes_vlm
 from trainhub.core.project import Project
 
 IOU_GOOD = 0.5

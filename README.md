@@ -164,6 +164,35 @@ class MyTrainer(BaseTrainer):
 
 界面上的训练框架下拉框、调参表单、实时曲线会自动适配，无需改动 UI 代码。
 
+## 代码结构
+
+```
+trainhub/
+├── app.py               # 入口：环境预处理 → QApplication → 主窗口
+├── core/                # 领域层（无 Qt，可独立测试）
+│   ├── project.py       #   项目即目录：trainhub.yaml 读写、路径派生
+│   ├── dataset.py       #   labelme JSON 扫描、train/val 切分
+│   ├── importer.py      #   导入冲突处理、.trash 归档（纯文件操作）
+│   ├── trainer.py       #   训练器插件接口（BaseTrainer / 任务 / 参数）
+│   ├── registry.py      #   训练器注册表
+│   ├── events.py        #   预标注/训练事件（log/进度/指标/产物）
+│   ├── recorder.py      #   metrics.jsonl 持久化
+│   ├── params.py        #   声明式参数 schema → 自动生成表单
+│   ├── devices.py       #   CUDA/MPS/CPU 设备探测与回退
+│   ├── prelabel.py      #   本地 YOLO 预标注推理
+│   └── vlm/             #   视觉大模型预标注
+│       ├── providers.py #     服务商预设与 Key 查找
+│       ├── prompt.py    #     提示词构造与白名单解析
+│       ├── parse.py     #     回复解析、坐标换算、标签归一化
+│       ├── client.py    #     OpenAI 兼容请求与总入口
+│       └── tracker.py   #     token/检出/费用统计
+├── annotator/           # labelme 6.3.0 兼容标注引擎（独立移植，GPL-3.0）
+├── trainers/            # 训练器插件：yolo / nnunet（各带数据转换器）
+└── ui/                  # PyQt6 界面：主窗口、三个页签、预标注/推理对话框
+```
+
+依赖方向：`ui → trainers → core`，`core` 与 `trainers` 不依赖 Qt；`annotator` 独立。
+
 ## 测试与 CI
 
 ```bash

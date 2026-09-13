@@ -18,6 +18,7 @@ from ..annotator.label_file import write_label_file
 from ..core.devices import DEVICE_CHOICES
 from ..core.devices import validate_device
 from ..core.prelabel import predict_shapes
+from ..core.prelabel_vlm import DEFAULT_DETECT_PROMPT
 from ..core.prelabel_vlm import ENV_KEYS
 from ..core.prelabel_vlm import VLM_PROVIDERS
 from ..core.prelabel_vlm import VLMProvider
@@ -233,6 +234,23 @@ class PrelabelDialog(QtWidgets.QDialog):
         self._key_edit.setPlaceholderText("粘贴 API Key（保存在本机，不写入项目）")
         vlm_form.addRow("API Key", self._key_edit)
 
+        self._prompt_edit = QtWidgets.QPlainTextEdit(DEFAULT_DETECT_PROMPT)
+        self._prompt_edit.setFixedHeight(64)
+        self._prompt_edit.setToolTip(
+            "检测任务描述（标什么、怎么标）。留空则使用默认提示词；"
+            "坐标与 JSON 输出格式由程序自动附加，无需手写。"
+        )
+        prompt_row = QtWidgets.QHBoxLayout()
+        prompt_row.setSpacing(6)
+        prompt_row.addWidget(self._prompt_edit, 1)
+        restore_button = QtWidgets.QPushButton("默认")
+        restore_button.setToolTip("恢复默认检测提示词")
+        restore_button.clicked.connect(
+            lambda: self._prompt_edit.setPlainText(DEFAULT_DETECT_PROMPT)
+        )
+        prompt_row.addWidget(restore_button)
+        vlm_form.addRow("检测提示词", prompt_row)
+
         self._hint_edit = QtWidgets.QLineEdit()
         self._hint_edit.setPlaceholderText("可选，如：只标完整可见的目标；忽略文字水印")
         vlm_form.addRow("补充要求", self._hint_edit)
@@ -404,6 +422,7 @@ class PrelabelDialog(QtWidgets.QDialog):
                     "api_key": api_key,
                     "model": model,
                     "base_url": base_url,
+                    "prompt": self._prompt_edit.toPlainText().strip(),
                     "hint": self._hint_edit.text().strip(),
                     "jobs": jobs,
                     "write": scope == "batch",

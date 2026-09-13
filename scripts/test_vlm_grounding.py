@@ -65,6 +65,7 @@ def main() -> int:
     parser.add_argument("--api-key", default="", help="不填则读环境变量")
     parser.add_argument("--model", default="", help="默认用该服务商的预设模型")
     parser.add_argument("--base-url", default="", help="覆盖服务商预设接口地址")
+    parser.add_argument("--prompt", default="", help="自定义检测任务提示词")
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--project", help="trainhub 项目目录")
     group.add_argument("--images", help="图像目录（配合 --annotations）")
@@ -125,6 +126,7 @@ def main() -> int:
                 model=args.model,
                 base_url=args.base_url,
                 labels=labels,
+                prompt=args.prompt,
                 max_side=args.max_side,
             )
         except VLMError as exc:

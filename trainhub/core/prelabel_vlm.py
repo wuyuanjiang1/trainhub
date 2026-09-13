@@ -118,12 +118,17 @@ def provider_env_key(provider_key: str) -> str | None:
 
 
 # --------------------------------------------------------------------- prompt
-def build_prompt(labels: Sequence[str], hint: str = "") -> str:
-    """构造检测框 prompt：注入项目标签，要求严格 JSON 输出。"""
-    lines = [
-        "你是图像数据标注助手。请找出图像中的所有目标，输出矩形边界框。",
-        "",
-    ]
+# 默认检测任务描述；界面上可被用户自定义提示词替换，坐标与 JSON 格式约定
+# 由 build_prompt 自动附加，用户无需也不应手写。
+DEFAULT_DETECT_PROMPT = (
+    "你是图像数据标注助手。请找出图像中的所有目标物体，逐一用矩形框标出。"
+)
+
+
+def build_prompt(labels: Sequence[str], hint: str = "", prompt: str = "") -> str:
+    """构造检测框 prompt：任务描述（可自定义）+ 标签约束 + 格式要求。"""
+    task = prompt.strip() or DEFAULT_DETECT_PROMPT
+    lines = [task, ""]
     if labels:
         shown = list(labels)[:MAX_PROMPT_LABELS]
         lines.append(
@@ -573,12 +578,14 @@ def predict_shapes_vlm(
     base_url: str = "",
     labels: Sequence[str] = (),
     hint: str = "",
+    prompt: str = "",
     max_side: int = 1600,
     timeout: float = 90.0,
     retries: int = 2,
 ) -> list[dict]:
     """对单张图像调用视觉大模型，返回候选标注（labelme shape 字典）。
 
+    ``prompt`` 为自定义检测任务描述，留空用默认的标框提示词；
     ``labels`` 为项目标签列表：非空时只保留这些类别，空列表表示自由命名。
     解析失败抛 :class:`VLMError`；个别目标框解析失败只记 warning 并跳过。
     """
@@ -592,12 +599,11 @@ def predict_shapes_vlm(
         raise VLMError("模型名为空，请填写要调用的视觉模型名称")
 
     image_b64, width, height, scale = _encode_image(image_path, max_side=max_side)
-    prompt = build_prompt(labels=labels, hint=hint)
     content = _chat_completion(
         base_url=base,
         api_key=api_key.strip(),
         model=model,
-        prompt=prompt,
+        prompt=build_prompt(labels=labels, hint=hint, prompt=prompt),
         image_b64=image_b64,
         timeout=timeout,
         retries=retries,

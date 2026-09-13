@@ -693,6 +693,7 @@ class AnnotateTab(QtWidgets.QWidget):
                     base_url=params["base_url"],
                     labels=labels,
                     hint=params.get("hint", ""),
+                    prompt=params.get("prompt", ""),
                 )
 
             note = provider.display_name

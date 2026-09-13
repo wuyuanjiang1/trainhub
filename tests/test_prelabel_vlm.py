@@ -168,6 +168,27 @@ def test_build_prompt_injects_labels_and_hint():
     assert "JSON" in prompt
 
 
+def test_build_prompt_custom_override_keeps_format_block():
+    prompt = build_prompt(
+        ["猫"], prompt="只标注画面中央的猫，忽略边缘的。", hint="配合夜间图像"
+    )
+    # 自定义任务描述替换默认那句
+    assert prompt.startswith("只标注画面中央的猫，忽略边缘的。")
+    assert "默认" not in prompt.split("\n")[0]
+    # 标签约束与格式约定仍然自动附加
+    assert "猫" in prompt
+    assert "0-1000" in prompt
+    assert "JSON" in prompt
+    assert "补充要求：配合夜间图像" in prompt
+
+
+def test_build_prompt_empty_falls_back_to_default():
+    from trainhub.core.prelabel_vlm import DEFAULT_DETECT_PROMPT
+
+    assert build_prompt([]).startswith(DEFAULT_DETECT_PROMPT)
+    assert build_prompt([], prompt="   ").startswith(DEFAULT_DETECT_PROMPT)
+
+
 def test_provider_presets_complete():
     for key, provider in VLM_PROVIDERS.items():
         assert provider.key == key

@@ -1,8 +1,8 @@
-"""Centralized Claude-inspired warm light theme.
+"""Centralized warm charcoal dark theme.
 
-Warm cream surfaces, a terracotta accent, and pill-shaped buttons — the
-"claude.ai" look. Every widget picks up its colors from here so the app stays
-consistent.
+Deep warm gray surfaces, a terracotta accent, and pill-shaped buttons — the
+"claude.ai dark" look. Every widget picks up its colors from here so the app
+stays consistent.
 """
 
 from __future__ import annotations
@@ -11,22 +11,25 @@ from PyQt6 import QtGui
 from PyQt6 import QtWidgets
 
 # ---- palette ---------------------------------------------------------------
-BG = "#FAF9F5"              # window / page — warm cream
-SURFACE = "#FFFFFF"         # cards, inputs
-SURFACE_RAISED = "#F3F1EA"  # buttons, hover (subtle warm tint)
-BORDER = "#E8E6DC"
-BORDER_STRONG = "#D6D2C4"
-TEXT = "#141413"
-TEXT_DIM = "#6E6A5E"
-TEXT_FAINT = "#A3A093"
+BG = "#1F1E1D"              # window / page — warm charcoal
+SURFACE = "#2A2926"         # cards, inputs
+SURFACE_RAISED = "#34322E"  # buttons, menus
+HOVER = "#3D3A34"           # button hover
+PRESSED = "#262522"         # button pressed
+BORDER = "#37342F"
+BORDER_STRONG = "#4A463E"
+TEXT = "#F4F2EC"
+TEXT_DIM = "#B3AFA3"
+TEXT_FAINT = "#7A766B"
 
 ACCENT = "#D97757"          # terracotta (Claude coral)
-ACCENT_STRONG = "#C15F3C"   # hover / pressed
-ACCENT_SOFT = "rgba(217, 119, 87, 0.12)"
+ACCENT_HOVER = "#E28B6D"
+ACCENT_STRONG = "#C15F3C"   # pressed
+ACCENT_SOFT = "rgba(217, 119, 87, 0.22)"
 
-SUCCESS = "#788C5D"
-WARNING = "#B45309"
-ERROR = "#C0392B"
+SUCCESS = "#8FAE6A"
+WARNING = "#D98E2B"
+ERROR = "#E06C55"
 
 LOG_COLORS = {
     "info": TEXT_DIM,
@@ -38,14 +41,20 @@ _TOKENS = {
     "BG": BG,
     "SURFACE": SURFACE,
     "SURFACE_RAISED": SURFACE_RAISED,
+    "HOVER": HOVER,
+    "PRESSED": PRESSED,
     "BORDER": BORDER,
     "BORDER_STRONG": BORDER_STRONG,
     "TEXT": TEXT,
     "TEXT_DIM": TEXT_DIM,
     "TEXT_FAINT": TEXT_FAINT,
     "ACCENT": ACCENT,
+    "ACCENT_HOVER": ACCENT_HOVER,
     "ACCENT_STRONG": ACCENT_STRONG,
     "ACCENT_SOFT": ACCENT_SOFT,
+    "SUCCESS": SUCCESS,
+    "WARNING": WARNING,
+    "ERROR": ERROR,
 }
 
 _QSS = """
@@ -99,11 +108,11 @@ QPushButton {
     padding: 7px 18px;
 }
 QPushButton:hover {
-    background-color: __BORDER__;
+    background-color: __HOVER__;
     border-color: __BORDER_STRONG__;
 }
 QPushButton:pressed {
-    background-color: __SURFACE__;
+    background-color: __PRESSED__;
 }
 QPushButton:disabled {
     color: __TEXT_FAINT__;
@@ -116,8 +125,8 @@ QPushButton[accent="true"] {
     color: #ffffff;
 }
 QPushButton[accent="true"]:hover {
-    background-color: __ACCENT_STRONG__;
-    border-color: __ACCENT_STRONG__;
+    background-color: __ACCENT_HOVER__;
+    border-color: __ACCENT_HOVER__;
 }
 QPushButton[accent="true"]:pressed {
     background-color: __ACCENT_STRONG__;
@@ -126,6 +135,17 @@ QPushButton[accent="true"]:disabled {
     background-color: __SURFACE__;
     border-color: __BORDER__;
     color: __TEXT_FAINT__;
+}
+QPushButton[danger="true"]:!disabled {
+    color: __ERROR__;
+}
+QPushButton[danger="true"]:hover:!disabled {
+    background-color: rgba(224, 108, 85, 0.16);
+    border-color: __ERROR__;
+}
+QPushButton[danger="true"]:pressed:!disabled {
+    background-color: rgba(224, 108, 85, 0.28);
+    border-color: __ERROR__;
 }
 
 QToolButton {
@@ -136,11 +156,11 @@ QToolButton {
     padding: 6px 12px;
 }
 QToolButton:hover {
-    background-color: __BORDER__;
+    background-color: __HOVER__;
     border-color: __BORDER_STRONG__;
 }
 QToolButton:pressed {
-    background-color: __SURFACE__;
+    background-color: __PRESSED__;
 }
 QToolButton:checked {
     background-color: __ACCENT__;
@@ -165,6 +185,10 @@ QLineEdit, QPlainTextEdit, QTextEdit, QAbstractSpinBox, QComboBox {
 QLineEdit:focus, QPlainTextEdit:focus, QTextEdit:focus,
 QAbstractSpinBox:focus, QComboBox:focus {
     border-color: __ACCENT__;
+}
+QPlainTextEdit[log="true"] {
+    padding: 8px 12px;
+    font-variant-ligatures: none;
 }
 QLineEdit:disabled, QPlainTextEdit:disabled, QTextEdit:disabled,
 QAbstractSpinBox:disabled, QComboBox:disabled {
@@ -238,12 +262,13 @@ QGroupBox {
     margin-top: 12px;
     padding-top: 6px;
     font-weight: 600;
+    background-color: __SURFACE__;
 }
 QGroupBox::title {
     subcontrol-origin: margin;
     left: 10px;
     padding: 0 4px;
-    color: __TEXT_DIM__;
+    color: __ACCENT__;
 }
 
 QCheckBox, QRadioButton {
@@ -368,12 +393,10 @@ QStatusBar::item {
 
 QSplitter::handle {
     background-color: __BORDER__;
+    border-radius: 2px;
 }
-QSplitter::handle:horizontal {
-    width: 1px;
-}
-QSplitter::handle:vertical {
-    height: 1px;
+QSplitter::handle:hover {
+    background-color: __BORDER_STRONG__;
 }
 """
 

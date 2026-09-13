@@ -43,11 +43,15 @@ class ParamForm(QtWidgets.QWidget):
             form.setFieldGrowthPolicy(
                 QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
             )
+            form.setHorizontalSpacing(12)
+            form.setVerticalSpacing(9)
+            form.setContentsMargins(12, 10, 12, 12)
             for spec in group_specs:
                 widget = self._build(spec)
                 if spec.help:
                     widget.setToolTip(spec.help)
                 label = QtWidgets.QLabel(spec.label)
+                label.setProperty("dim", True)
                 label.setToolTip(spec.help)
                 form.addRow(label, widget)
             layout.addWidget(box)
@@ -65,6 +69,7 @@ class ParamForm(QtWidgets.QWidget):
             if spec.step:
                 spin.setSingleStep(int(spec.step))
             spin.setValue(int(spec.default))
+            spin.setMinimumHeight(30)
             spin.valueChanged.connect(self.valueChanged)
             self._getters[spec.key] = spin.value
             self._setters[spec.key] = spin.setValue
@@ -78,6 +83,7 @@ class ParamForm(QtWidgets.QWidget):
             spin.setDecimals(spec.decimals)
             spin.setSingleStep(spec.step if spec.step else 10 ** (-spec.decimals))
             spin.setValue(float(spec.default))
+            spin.setMinimumHeight(30)
             spin.valueChanged.connect(self.valueChanged)
             self._getters[spec.key] = spin.value
             self._setters[spec.key] = spin.setValue
@@ -98,6 +104,7 @@ class ParamForm(QtWidgets.QWidget):
             if spec.allow_custom:
                 combo.setInsertPolicy(QtWidgets.QComboBox.InsertPolicy.NoInsert)
             combo.setCurrentText(str(spec.default))
+            combo.setMinimumHeight(30)
             combo.currentTextChanged.connect(self.valueChanged)
             self._getters[spec.key] = combo.currentText
             self._setters[spec.key] = combo.setCurrentText
@@ -108,6 +115,7 @@ class ParamForm(QtWidgets.QWidget):
             row = QtWidgets.QHBoxLayout(container)
             row.setContentsMargins(0, 0, 0, 0)
             edit = QtWidgets.QLineEdit(str(spec.default))
+            edit.setMinimumHeight(30)
             button = QtWidgets.QPushButton("浏览…")
             button.setFixedWidth(70)
             button.clicked.connect(lambda: self._browse(edit))
@@ -120,6 +128,7 @@ class ParamForm(QtWidgets.QWidget):
 
         else:  # str
             edit = QtWidgets.QLineEdit(str(spec.default))
+            edit.setMinimumHeight(30)
             edit.textChanged.connect(self.valueChanged)
             self._getters[spec.key] = edit.text
             self._setters[spec.key] = edit.setText

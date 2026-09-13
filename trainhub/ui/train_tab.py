@@ -56,6 +56,7 @@ class TrainTab(QtWidgets.QWidget):
         self._start_button.setProperty("accent", True)
         self._start_button.clicked.connect(self.start_training)
         self._stop_button = QtWidgets.QPushButton("停止")
+        self._stop_button.setProperty("danger", True)
         self._stop_button.setEnabled(False)
         self._stop_button.clicked.connect(self.stop_training)
 
@@ -72,7 +73,16 @@ class TrainTab(QtWidgets.QWidget):
         self._log = QtWidgets.QPlainTextEdit()
         self._log.setReadOnly(True)
         self._log.setMaximumBlockCount(5000)
-        self._log.setFont(QtGui.QFont("Menlo", 11))
+        self._log.setProperty("log", True)
+        log_font = QtGui.QFont()
+        # Menlo is macOS-only; keep an explicit monospace stack so per-epoch
+        # summary lines align on Windows / Linux too.
+        log_font.setFamilies(
+            ["Consolas", "Menlo", "Cascadia Mono", "Courier New"]
+        )
+        log_font.setStyleHint(QtGui.QFont.StyleHint.Monospace)
+        log_font.setPointSize(10)
+        self._log.setFont(log_font)
 
         self._artifacts = QtWidgets.QListWidget()
         self._artifacts.itemDoubleClicked.connect(self._open_artifact)
@@ -93,11 +103,13 @@ class TrainTab(QtWidgets.QWidget):
 
         left = QtWidgets.QWidget()
         left_layout = QtWidgets.QVBoxLayout(left)
-        left_layout.setContentsMargins(6, 6, 6, 6)
+        left_layout.setContentsMargins(10, 10, 6, 10)
+        left_layout.setSpacing(8)
         left_layout.addLayout(selector)
         left_layout.addWidget(self._params_scroll, 1)
         actions = QtWidgets.QHBoxLayout()
-        actions.addWidget(self._start_button)
+        actions.setSpacing(8)
+        actions.addWidget(self._start_button, 1)
         actions.addWidget(self._stop_button)
         left_layout.addLayout(actions)
         left_layout.addWidget(self._phase_label)
@@ -110,15 +122,21 @@ class TrainTab(QtWidgets.QWidget):
         right.addTab(self._log, "训练日志")
         right.addTab(self._artifacts, "产物")
 
-        panes = QtWidgets.QHBoxLayout()
-        panes.setContentsMargins(0, 0, 0, 0)
-        panes.setSpacing(0)
-        panes.addWidget(left, 1)
-        panes.addWidget(right, 1)
+        # Draggable split: the form keeps a readable minimum width, the charts
+        # get the lion's share on wide screens.
+        panes = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
+        panes.setChildrenCollapsible(False)
+        panes.setHandleWidth(6)
+        panes.addWidget(left)
+        panes.addWidget(right)
+        panes.setStretchFactor(0, 5)
+        panes.setStretchFactor(1, 6)
+        left.setMinimumWidth(380)
+        right.setMinimumWidth(440)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.addLayout(panes)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(panes)
 
     # ------------------------------------------------------------- trainers
     def _populate_trainers(self) -> None:

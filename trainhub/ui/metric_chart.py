@@ -105,9 +105,21 @@ class MetricChart(QtWidgets.QWidget):
             self._figure.add_subplot(3, 1, index + 1) for index in range(3)
         ]
         self._toolbar = NavigationToolbar(self._canvas, self)
+        # matplotlib ships dark toolbar icons; on the dark theme they need a
+        # light strip to stay visible, so float the toolbar on a warm pill.
+        self._toolbar.setStyleSheet(
+            "QToolBar { background: #F3F1EA; border: none; border-radius: 10px;"
+            " padding: 2px 6px; spacing: 2px; }"
+            "QToolButton { background: transparent; border: none;"
+            " border-radius: 6px; padding: 3px; }"
+            "QToolButton:hover { background: rgba(0, 0, 0, 0.08); }"
+            "QToolBar::separator { background: rgba(0, 0, 0, 0.12);"
+            " width: 1px; margin: 4px 4px; }"
+        )
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setContentsMargins(8, 8, 8, 0)
+        layout.setSpacing(6)
         layout.addWidget(self._toolbar)
         layout.addWidget(self._canvas, 1)
 

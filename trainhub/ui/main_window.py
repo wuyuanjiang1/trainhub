@@ -23,6 +23,12 @@ class MainWindow(QtWidgets.QMainWindow):
         super().__init__(parent)
         self.setWindowTitle("trainhub — 标注与训练工作站")
         self.resize(1560, 960)
+        self.setMinimumSize(1120, 700)
+        screen = QtGui.QGuiApplication.primaryScreen().availableGeometry()
+        self.move(
+            screen.x() + max((screen.width() - self.width()) // 2, 0),
+            screen.y() + max((screen.height() - self.height()) // 2, 0),
+        )
 
         self._project = project or Project.create(
             Path.cwd() / "trainhub_project", name="新项目"

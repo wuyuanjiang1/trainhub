@@ -2,7 +2,7 @@
 
 推理跑在 QThread 里，界面不卡顿；单图模式把候选 shape 发回画布，批量模式
 直接写标注 JSON（与手动保存同格式），逐张回报进度。大模型引擎走 OpenAI
-兼容接口，服务商预设见 :mod:`trainhub.core.prelabel_vlm`；API Key 存在本机
+兼容接口，服务商预设见 :mod:`trainhub.core.vlm`；API Key 存在本机
 QSettings，绝不写入项目目录（trainhub.yaml 会被整目录拷贝分享）。
 批量模式下"未检出候选"的图像会逐张经 file_empty 上报，结束时汇总展示，
 避免大面积空结果被静默吞掉。
@@ -20,12 +20,12 @@ from PyQt6 import QtWidgets
 from ..annotator.label_file import write_label_file
 from ..core.devices import DEVICE_CHOICES
 from ..core.devices import validate_device
-from ..core.prelabel_vlm import DEFAULT_DETECT_PROMPT
-from ..core.prelabel_vlm import ENV_KEYS
-from ..core.prelabel_vlm import VLM_PROVIDERS
-from ..core.prelabel_vlm import VLMProvider
-from ..core.prelabel_vlm import provider_env_key
-from ..core.prelabel_vlm import test_connection
+from ..core.vlm import DEFAULT_DETECT_PROMPT
+from ..core.vlm import ENV_KEYS
+from ..core.vlm import VLM_PROVIDERS
+from ..core.vlm import VLMProvider
+from ..core.vlm import provider_env_key
+from ..core.vlm import test_connection
 from .theme import mono_font
 
 _SETTINGS_ORG = "trainhub"
@@ -37,9 +37,6 @@ _DEVICE_LABELS = {
     "mps": "MPS（Apple 芯片）",
     "cpu": "CPU",
 }
-
-_NOTE_COLOR = "#9a938a"
-
 
 def _saved_api_key(provider_key: str) -> str:
     settings = QtCore.QSettings(_SETTINGS_ORG, _SETTINGS_APP)
@@ -54,7 +51,7 @@ def _store_api_key(provider_key: str, api_key: str) -> None:
 def _dim_note(text: str) -> QtWidgets.QLabel:
     label = QtWidgets.QLabel(text)
     label.setWordWrap(True)
-    label.setStyleSheet(f"color: {_NOTE_COLOR};")
+    label.setProperty("dim", True)
     return label
 
 

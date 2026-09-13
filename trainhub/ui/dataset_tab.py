@@ -59,6 +59,8 @@ class DatasetTab(QtWidgets.QWidget):
         buttons.addWidget(refresh)
 
         layout = QtWidgets.QVBoxLayout(self)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
         layout.addLayout(buttons)
         layout.addWidget(self._summary)
         layout.addWidget(self._progress)

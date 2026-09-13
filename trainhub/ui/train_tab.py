@@ -10,7 +10,6 @@ from PyQt6 import QtGui
 from PyQt6 import QtWidgets
 
 from ..core.project import Project
-from ..core.prelabel import find_project_weights
 from ..core.recorder import read_metrics
 from ..core.registry import all_trainers
 from ..core.registry import get_trainer
@@ -39,7 +38,6 @@ class TrainTab(QtWidgets.QWidget):
         self._project = project
         self._runner: TrainRunner | None = None
         self._form: ParamForm | None = None
-        self._infer_dialog = None
 
         load_builtin_trainers()
 
@@ -99,10 +97,11 @@ class TrainTab(QtWidgets.QWidget):
         selector.addRow("任务类型", self._task_combo)
         selector.addRow("运行名称", self._run_name)
 
-        left = QtWidgets.QWidget()
+        left = QtWidgets.QFrame()
+        left.setObjectName("sideCard")
         left_layout = QtWidgets.QVBoxLayout(left)
-        left_layout.setContentsMargins(10, 10, 6, 10)
-        left_layout.setSpacing(8)
+        left_layout.setContentsMargins(10, 10, 10, 10)
+        left_layout.setSpacing(6)
         left_layout.addLayout(selector)
         left_layout.addWidget(self._params_scroll, 1)
         actions = QtWidgets.QHBoxLayout()
@@ -114,12 +113,6 @@ class TrainTab(QtWidgets.QWidget):
         left_layout.addWidget(self._progress)
         left_layout.addWidget(section_label("历史运行"))
         left_layout.addWidget(self._history_combo)
-        self._infer_button = QtWidgets.QPushButton("推理预览…")
-        self._infer_button.setToolTip(
-            "用项目里训练产出的权重对图像跑一遍，画框结果存到该次运行的 predictions/ 目录"
-        )
-        self._infer_button.clicked.connect(self.open_infer_dialog)
-        left_layout.addWidget(self._infer_button)
 
         right = QtWidgets.QTabWidget()
         artifacts_pane = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
@@ -137,18 +130,28 @@ class TrainTab(QtWidgets.QWidget):
 
         # Draggable split: the form keeps a readable minimum width, the charts
         # get the lion's share on wide screens.
+        # 规范布局：侧栏固定 300px 内部滚动，主视图占大头
+        left_scroll = QtWidgets.QScrollArea()
+        left_scroll.setWidget(left)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setFixedWidth(300)
+        left_scroll.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        left_scroll.setStyleSheet("QScrollArea { border: none; background: transparent; }")
+
         panes = QtWidgets.QSplitter(QtCore.Qt.Orientation.Horizontal)
         panes.setChildrenCollapsible(False)
-        panes.setHandleWidth(6)
-        panes.addWidget(left)
+        panes.setHandleWidth(16)
+        panes.addWidget(left_scroll)
         panes.addWidget(right)
-        panes.setStretchFactor(0, 5)
-        panes.setStretchFactor(1, 6)
-        left.setMinimumWidth(380)
+        panes.setStretchFactor(0, 0)
+        panes.setStretchFactor(1, 1)
         right.setMinimumWidth(440)
 
         layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setContentsMargins(12, 10, 12, 10)
+        layout.setSpacing(10)
         layout.addWidget(panes)
 
     # ------------------------------------------------------------- trainers
@@ -283,54 +286,6 @@ class TrainTab(QtWidgets.QWidget):
         # Auto-preview the first artifact so the pane is never a dead wall.
         if self._artifacts.count():
             self._artifacts.setCurrentRow(1 if has_dataset_item else 0)
-
-    # ------------------------------------------------------------- 推理预览
-    def open_infer_dialog(self) -> None:
-        from .infer_dialog import InferDialog
-
-        if self._infer_dialog is not None and self._infer_dialog.isVisible():
-            self._infer_dialog.raise_()
-            return
-        weights = find_project_weights(self._project.root, limit=8)
-        if not weights:
-            QtWidgets.QMessageBox.information(
-                self,
-                "推理预览",
-                "项目里还没有训练产出的权重（runs/*/weights/*.pt）。\n"
-                "先训练一次，再回来做推理预览。",
-            )
-            return
-        options = [
-            (f"{w.parent.parent.name} / {w.name}", str(w)) for w in weights
-        ]
-        out_dir = weights[0].parent.parent / "predictions"
-        self._infer_dialog = InferDialog(
-            self, weight_options=options,
-            images_dir=self._project.images_dir, out_dir=out_dir,
-        )
-        self._infer_dialog.start_requested.connect(self._start_inference)
-        self._infer_dialog.show()
-
-    def _start_inference(self, params: dict) -> None:
-        from .infer_dialog import InferWorker
-
-        out_dir = Path(params["out_dir"])
-        out_dir.mkdir(parents=True, exist_ok=True)
-        worker = InferWorker(
-            weights=params["weights"],
-            images=params["images"],
-            out_dir=out_dir,
-            conf=params["conf"],
-            parent=self,
-        )
-        dialog = self._infer_dialog
-        worker.progress.connect(dialog.on_progress)
-        worker.image_done.connect(dialog.on_image_done)
-        worker.failed.connect(dialog.on_failed)
-        worker.finished.connect(dialog.on_finished)
-        dialog.worker = worker
-        dialog.begin_run(len(params["images"]))
-        worker.start()
 
     # -------------------------------------------------------------- running
     def start_training(self) -> None:

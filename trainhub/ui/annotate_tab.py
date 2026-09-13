@@ -209,6 +209,8 @@ class AnnotateTab(QtWidgets.QWidget):
         self._build_toolbar()
         self._build_layout()
         self._populate_canvas_context_menu()
+        # 标签表任何变化（导入/预标注登记/删除）都同步重建候选标签列表
+        self.labelsChanged.connect(self._on_labels_changed)
 
         self._switch_canvas_mode(edit=True)
         self.set_project(project)
@@ -512,6 +514,15 @@ class AnnotateTab(QtWidgets.QWidget):
                 label=label,
                 color=self._get_rgb_by_label(label, self._unique_label_list),
             )
+
+    def _on_labels_changed(self, labels: list) -> None:
+        """项目标签表变化时，同步候选标签列表与标注对话框，无需重开项目。"""
+        self._label_dialog = LabelDialog(
+            text="输入或选择标签",
+            parent=self,
+            labels=list(labels),
+        )
+        self._rebuild_unique_label_list()
 
     def _reset_state(self) -> None:
         self._label_list.clear()
@@ -943,6 +954,12 @@ class AnnotateTab(QtWidgets.QWidget):
             if directory.exists():
                 shutil.rmtree(directory)
             directory.mkdir(parents=True, exist_ok=True)
+        # 换新数据集 = 换词表：老标签与译名登记表一并清掉，防止旧类别串进新图集
+        if self._project.labels or self._project.label_translations:
+            self._project.labels = []
+            self._project.label_translations = {}
+            self._project.save()
+            self.labelsChanged.emit([])
 
     def _copy_image_with_annotation(self, src: Path, target: Path) -> set[str]:
         shutil.copy2(src, target)

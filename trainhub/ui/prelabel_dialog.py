@@ -504,6 +504,9 @@ class PrelabelDialog(QtWidgets.QDialog):
 
     def on_finished(self) -> None:
         self._cancel_button.setEnabled(False)
+        # 跑完/停止后进度条归零并隐藏；最终数字由统计行与汇总消息承载
+        self._progress.setValue(0)
+        self._progress.hide()
         self._start_button.setEnabled(True)
         self._test_button.setEnabled(True)
         self._yolo_group.setEnabled(True)
